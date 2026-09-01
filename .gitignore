@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Secrets — never commit
+.figma-token
+.anthropic-key
+.gemini-key
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Generated artifacts
+example/out/
+.figma-cache/
+*.log
+*.tsbuildinfo
+
+# Local rate-limit state (see FigmaRestSource lockout)
+.figma-nodes-lockout.json
+
+# Sample apps produced BY the pipeline — full Next.js projects, each ~560 MB with
+# its own git repo and node_modules. They are output, not source; the showcase
+# renders in docs/ are what the README points at.
+examples/
+
+# Local agent / editor config
+.claude/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp

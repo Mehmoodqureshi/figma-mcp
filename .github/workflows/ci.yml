@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node-version: [20, 22]
+        # One Windows job guards against POSIX-only assumptions (path handling,
+        # .cmd bin shims) regressing for native-Windows users.
+        include:
+          - os: windows-latest
+            node-version: 22
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    env:
+      # CI needs no browser: the adapter test mocks the Figma REST API and never
+      # renders. postinstall skips the download on CI anyway; this is belt-and-braces.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      # Every shipped file has to at least parse — there is no compiler to catch
+      # a typo in a module that only loads on an uncommon branch.
+      - name: Syntax check
+        run: node -e "const{execFileSync}=require('node:child_process');const fs=require('node:fs'),p=require('node:path');const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.name==='node_modules'?[]:e.isDirectory()?walk(p.join(d,e.name)):e.name.endsWith('.js')?[p.join(d,e.name)]:[]);const files=[...walk('src'),...walk('example'),...walk('scripts')];for(const f of files)execFileSync(process.execPath,['--check',f]);console.log(files.length+' files parse')"
+
+      # Full chain — loadFrame -> figmaToIR -> generateHtml — against a mocked
+      # Figma REST API. No token, no network, no browser.
+      - name: Test
+        run: npm test

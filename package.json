@@ -1,0 +1,76 @@
+{
+  "name": "@mehmoodqureshi/figma-mcp",
+  "version": "0.1.0",
+  "description": "Figma to pixel-perfect code, as an MCP server. Converts a frame to self-contained HTML deterministically, then closes the loop: renders your code in Chromium, pixel-diffs it against the Figma reference, and tells the agent exactly which elements are missing or misplaced.",
+  "author": "Mehmood Ur Rehman Qureshi",
+  "license": "MIT",
+  "homepage": "https://github.com/Mehmoodqureshi/figma-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mehmoodqureshi/figma-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Mehmoodqureshi/figma-mcp/issues"
+  },
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./ir": "./src/ir/index.js",
+    "./codegen": "./src/codegen/index.js"
+  },
+  "bin": {
+    "figma-mcp": "src/mcp/server.js"
+  },
+  "files": [
+    "src/**/*.js",
+    "src/**/*.md",
+    "scripts/postinstall.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "figma",
+    "figma-to-code",
+    "figma-api",
+    "design-to-code",
+    "pixel-perfect",
+    "visual-diff",
+    "visual-regression",
+    "html",
+    "react",
+    "playwright",
+    "ai-agent",
+    "claude",
+    "claude-code"
+  ],
+  "scripts": {
+    "serve": "node src/mcp/server.js",
+    "test": "node example/mcp-adapter-test.js",
+    "test:server": "node example/mcp-server-test.js",
+    "example": "node example/run-example.js",
+    "example:ir": "node example/ir-example.js",
+    "example:codegen": "node example/codegen-example.js",
+    "example:element-diff": "node example/element-diff-example.js",
+    "example:responsive": "node example/responsive-example.js",
+    "example:pipeline": "node example/pipeline.js",
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "pixelmatch": "^6.0.0",
+    "playwright": "^1.48.0",
+    "pngjs": "^7.0.0",
+    "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
