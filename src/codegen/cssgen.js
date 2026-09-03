@@ -17,20 +17,36 @@ import { ROLES } from '../ir/schema.js';
 const px = (n) => `${Number(Number(n).toFixed(2))}px`;
 
 /**
+ * A token name → a syntactically valid CSS custom property.
+ *
+ * Only `/` and `.` used to be replaced, which is fine for a tidy name like
+ * 'color/surface/card' but not for the raw ids Figma returns when the Variables
+ * API is unavailable: 'VariableID:60c6c3…/113:705'. A custom property name must
+ * be an identifier, and `:` is not an identifier character — so `var(--Variable
+ * ID:60c6…)` is a PARSE error, and the browser drops the whole declaration
+ * silently. On the frame this was found on, every token-bound `gap` vanished and
+ * three testimonial columns lost their internal spacing with no warning
+ * anywhere. Anything outside [A-Za-z0-9_-] is collapsed to a dash.
+ */
+function tokenVarName(name) {
+  return `--${String(name).replace(/[^A-Za-z0-9_-]+/g, '-')}`;
+}
+
+/**
  * 'color/surface/card' → var(--color-surface-card, <fallback>).
  * The fallback is the exact value resolved from Figma, so the FIRST render is
  * correct even before the real token file is wired — then the token wins once
  * defined. Don't emit `--x: initial` in :root or it would shadow this fallback.
  */
 export function tokenToVar(name, fallback) {
-  const varName = `--${String(name).replace(/[/.]+/g, '-')}`;
+  const varName = tokenVarName(name);
   return fallback != null ? `var(${varName}, ${fallback})` : `var(${varName})`;
 }
 
 /** Collect every token referenced in the tree into :root custom properties. */
 export function collectTokenVars(node, acc = new Map()) {
   for (const tokenName of Object.values(node.tokens || {})) {
-    const varName = `--${String(tokenName).replace(/[/.]+/g, '-')}`;
+    const varName = tokenVarName(tokenName);
     if (!acc.has(varName)) acc.set(varName, ''); // value filled from real token file
   }
   (node.children || []).forEach((c) => collectTokenVars(c, acc));
@@ -137,6 +153,23 @@ function applyBackground(d, node, opts) {
       sizes.push(S.imageFit?.fit === 'contain' ? 'contain' : 'cover');
       positions.push('center');
       repeats.push('no-repeat');
+    }
+  }
+
+  // A paint-level opacity has no CSS equivalent on a single background layer, so
+  // it becomes element opacity — correct for the decorative leaf images this
+  // shows up on (a hero photo sunk into the frame colour), but it would fade a
+  // container's children too, so a node with content keeps full opacity and
+  // says so instead of quietly dimming its own text.
+  const fillAlpha = S.imageFit?.opacity;
+  if (fillAlpha != null) {
+    if ((node.children || []).length === 0) {
+      const own = typeof S.opacity === 'number' ? S.opacity : 1;
+      d.opacity = String(Number((own * fillAlpha).toFixed(4)));
+    } else {
+      node.warnings?.push?.(
+        `IMAGE_FILL_OPACITY: ${fillAlpha} on a node with children — not applied, it would fade them too`
+      );
     }
   }
 
@@ -258,6 +291,9 @@ export function cssDeclarations(node, opts = {}) {
     d.top = px(box.y);
   }
   if (L.alignSelf) d['align-self'] = L.alignSelf;
+  if (L.justifySelf) d['justify-self'] = L.justifySelf;
+  if (L.gridColumn) d['grid-column'] = L.gridColumn;
+  if (L.gridRow) d['grid-row'] = L.gridRow;
 
   // --- how this node lays out its children ------------------------------
   if (L.mode === 'flex') {
@@ -270,6 +306,18 @@ export function cssDeclarations(node, opts = {}) {
     d['justify-content'] = L.justify;
     d['align-items'] = L.align;
     if (L.wrap === 'wrap') d['flex-wrap'] = 'wrap';
+  } else if (L.mode === 'grid') {
+    // Figma's own track lists go straight through — they are already CSS syntax
+    // and are validated in autolayout.js before reaching here.
+    d.display = 'grid';
+    if (L.columns) d['grid-template-columns'] = L.columns;
+    if (L.rows) d['grid-template-rows'] = L.rows;
+    if (L.columnGap) d['column-gap'] = px(L.columnGap);
+    if (L.rowGap) d['row-gap'] = px(L.rowGap);
+    if (L.padding) {
+      d.padding = `${px(L.padding.top)} ${px(L.padding.right)} ${px(L.padding.bottom)} ${px(L.padding.left)}`;
+    }
+    if (L.align) d['align-items'] = L.align;
   } else if (L.mode === 'absolute') {
     // Establish a containing block for absolutely-positioned children.
     if (!d.position) d.position = 'relative';
@@ -315,3 +363,51 @@ export function declToString(d) {
 
 /** Minimal reset so box-sizing/margins don't fight the exact sizing above. */
 export const RESET = `*{margin:0;box-sizing:border-box;} body{font-family:-apple-system,'Inter',Arial,sans-serif;}`;
+
+/**
+ * Stage 8, second half — the scaling shell for a design with NO Auto Layout.
+ *
+ * `axisRule` can only make a frame fluid when Figma told us the sizing intent
+ * (FILL/HUG). A hand-placed canvas has none: every child is `position:absolute`
+ * at a coordinate on a 1440px artboard, so relaxing the ROOT to `width:100%`
+ * just means the children keep their 1440-canvas coordinates inside a narrower
+ * box and the right-hand side is silently clipped by `overflow:hidden`. The
+ * page doesn't reflow — it loses content, which is what browser zoom looks
+ * like to a user.
+ *
+ * There is no honest reflow for those coordinates, so we scale instead: the
+ * canvas stays exactly as designed and the whole thing is mapped to the
+ * available width. Layout is unaffected by `transform`, so the shell's own
+ * width/height are set to the SCALED box — otherwise the page would reserve
+ * the full 1440x4096 and leave dead space below and a phantom scrollbar.
+ *
+ * Without JS this degrades to the unscaled canvas, i.e. exactly the old output.
+ */
+export function canvasFitCss(width, height) {
+  return (
+    `html{overflow-x:auto;}` +
+    `.figma-canvas-fit{position:relative;width:100%;max-width:${px(width)};` +
+    `height:${px(height)};margin:0 auto;overflow:hidden;}` +
+    `.figma-canvas-fit>*{transform-origin:top left;transform:scale(var(--canvas-scale,1));}`
+  );
+}
+
+/**
+ * Below `minScale` we stop shrinking and let the page scroll horizontally —
+ * past roughly half size the design is unreadable anyway, and a scrollbar is a
+ * better failure than 6px type. The last applied scale is remembered so the
+ * ResizeObserver can't oscillate against the vertical scrollbar appearing and
+ * disappearing as the shell's height changes.
+ */
+export function canvasFitScript(width, height, minScale) {
+  return (
+    `(function(){var W=${width},H=${height},MIN=${minScale},last=-1;` +
+    `var el=document.querySelector('.figma-canvas-fit');if(!el)return;` +
+    `function fit(){var avail=document.documentElement.clientWidth;` +
+    `var s=Math.min(1,Math.max(MIN,avail/W));s=Math.round(s*1e4)/1e4;` +
+    `if(s===last)return;last=s;el.style.setProperty('--canvas-scale',s);` +
+    `el.style.width=(W*s)+'px';el.style.maxWidth='none';el.style.height=(H*s)+'px';}` +
+    `fit();addEventListener('resize',fit);` +
+    `if(window.ResizeObserver)new ResizeObserver(fit).observe(document.documentElement);})();`
+  );
+}

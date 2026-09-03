@@ -39,6 +39,11 @@ import {
   computeElementDiffs,
   buildElementCorrection,
 } from '../elementDiff.js';
+import {
+  expectedPaintOrder,
+  computePaintDiffs,
+  buildPaintCorrection,
+} from '../paintOrder.js';
 import { loadCredentials } from '../config/credentials.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -113,6 +118,16 @@ function collectAssets(node, acc = { imageFills: [], imageNodes: [], vectors: []
 }
 
 /** Count IR nodes by role, for the convert summary. */
+/** Count IR warnings by their WARN code, so the summary can flag whole classes. */
+function warningCounts(node, acc = {}) {
+  for (const w of node.warnings || []) {
+    const code = String(w).split(':')[0];
+    acc[code] = (acc[code] || 0) + 1;
+  }
+  (node.children || []).forEach((c) => warningCounts(c, acc));
+  return acc;
+}
+
 function roleCounts(node, acc = {}) {
   acc[node.role] = (acc[node.role] || 0) + 1;
   (node.children || []).forEach((c) => roleCounts(c, acc));
@@ -148,7 +163,11 @@ server.registerTool(
         .default(false)
         .describe(
           'Emit the responsive variant (Figma FILL→flex/100%, HUG→fit-content, FIXED→px kept) ' +
-            'instead of the exact-sizing variant. Exact is the right starting point for verify.'
+            'instead of the exact-sizing variant. A frame with NO Auto Layout has no sizing ' +
+            'intent to relax, so it keeps its exact CSS and is scaled to fit the viewport ' +
+            'instead — otherwise its absolutely-placed children stay pinned to the design ' +
+            'canvas and get clipped rather than reflowed. Exact is still the right starting ' +
+            'point for verify.'
         ),
       react: z
         .boolean()
@@ -259,9 +278,13 @@ server.registerTool(
       // --- 4. Codegen ---
       const html = generateHtml(ir, { title: raw.name, assets, responsive });
       fs.writeFileSync(p('generated.html'), html);
-      if (react) fs.writeFileSync(p('generated.jsx'), generateReact(ir, { assets }));
+      if (react) fs.writeFileSync(p('generated.jsx'), generateReact(ir, { assets, responsive }));
+      // Reported below so the agent knows WHICH responsive strategy it got.
+      const canvasFit = responsive && ir.layout?.mode === 'absolute';
 
       const counts = roleCounts(ir);
+      const warnCounts = warningCounts(ir);
+      const mirrorUnknown = warnCounts.MIRROR_UNKNOWN || 0;
       const countLine = Object.entries(counts)
         .sort((a, b) => b[1] - a[1])
         .map(([r, n]) => `${n} ${r}`)
@@ -271,7 +294,9 @@ server.registerTool(
       const lines = [
         `Converted "${raw.name}" (${raw.type}) — ${ir.box.width}x${ir.box.height}`,
         ``,
-        `  ${p('generated.html')}   ${(html.length / 1024).toFixed(0)} KB${responsive ? ' (responsive)' : ' (exact sizing)'}`,
+        `  ${p('generated.html')}   ${(html.length / 1024).toFixed(0)} KB${
+          responsive ? (canvasFit ? ' (responsive — scaled canvas)' : ' (responsive — fluid)') : ' (exact sizing)'
+        }`,
         `  ${p('reference.png')}    the Figma render — the target`,
         `  ${p('ir.json')}          ${Object.values(counts).reduce((a, b) => a + b, 0)} nodes: ${countLine}`,
         react ? `  ${p('generated.jsx')}   React variant` : null,
@@ -279,6 +304,19 @@ server.registerTool(
         `Assets: ${imageFills.length} image-fill + ${vectors.length} vector requested, ${embedded} embedded as data URIs.`,
         `Tokens: ${tokenCount} Figma variables resolved${tokenCount === 0 ? ' (none — the Variables API is Enterprise-only, so colors are exact literals)' : ''}.`,
         `Components: ${Object.keys(componentMap).length} bound by name (prop bindings need Code Connect).`,
+        mirrorUnknown
+          ? `\nDEGRADED GEOMETRY: ${mirrorUnknown} rotated node(s) arrived with \`rotation\` but no ` +
+            `\`relativeTransform\` — the whole-file endpoint, which getNode() falls back to when ` +
+            `/nodes is rate-limited, omits it. A mirrored node is indistinguishable from a rotated ` +
+            `one in that payload, so those nodes render flipped about their own centre. Re-run with ` +
+            `refresh=true once the /nodes budget has reset to get the real transform.`
+          : null,
+        canvasFit
+          ? `\nThis frame has no Auto Layout on the root, so there is no sizing intent to turn into ` +
+            `flex/%. The exact ${ir.box.width}x${ir.box.height} canvas is kept and scaled to the ` +
+            `viewport instead (floor 0.5x, then the page scrolls). Add Auto Layout in Figma if you ` +
+            `want real reflow rather than proportional scaling.`
+          : null,
         cachedRaw ? `\n(Served from cache. Pass refresh=true to re-fetch.)` : null,
         problems.length
           ? `\nIR validation warnings (${problems.length}): ${problems.slice(0, 3).join('; ')}`
@@ -319,8 +357,9 @@ server.registerTool(
     title: 'Verify rendered code against the Figma design',
     description:
       'Render an HTML file in Chromium, pixel-diff it against the Figma reference, and check each ' +
-      'element position with bounding-box IoU. Returns the diff ratio plus specific instructions on ' +
-      'what to fix (MISSING / MISPLACED elements, worst regions). Writes render.png and diff.png. ' +
+      'element position with bounding-box IoU, paint order (z-index) and clipping. Returns the diff ' +
+      'ratio plus specific instructions on what to fix (MISSING / MISPLACED / WRONG STACKING / ' +
+      'OVER-CLIPPED elements, worst regions). Writes render.png and diff.png. ' +
       'Edit the HTML based on the correction and call this again to iterate toward pixel-exact. ' +
       'Read the returned diff.png to see the mismatches highlighted.',
     inputSchema: {
@@ -386,11 +425,13 @@ server.registerTool(
       let renderPng;
       let elementCorrection = '';
       let elementSummary = 'skipped (no ir.json)';
+      let paintCorrection = '';
+      let paintSummary = 'skipped (no ir.json)';
 
       if (ir) {
         const expected = flattenExpectedBoxes(ir);
         const ids = expected.map((e) => e.id);
-        const { png, boxes } = await renderHtmlWithBoxes(html, ids, ir.id, renderOpts);
+        const { png, boxes, paint } = await renderHtmlWithBoxes(html, ids, ir.id, renderOpts);
         renderPng = png;
         const findings = computeElementDiffs(expected, boxes);
         elementCorrection = buildElementCorrection(findings, { rootId: ir.id });
@@ -398,6 +439,15 @@ server.registerTool(
         const misplaced = findings.filter((f) => f.status === 'misplaced').length;
         const ok = findings.filter((f) => f.status === 'ok').length;
         elementSummary = `${ok}/${findings.length} elements match (IoU >= 0.6) — ${missing} missing, ${misplaced} misplaced`;
+
+        // Right box, wrong layer: a z-order or clipping mistake moves nothing
+        // and barely shifts the diff ratio, so it needs its own check.
+        const paintFindings = computePaintDiffs(expectedPaintOrder(ir), paint);
+        paintCorrection = buildPaintCorrection(paintFindings);
+        paintSummary =
+          paintFindings.stacking.length || paintFindings.clipping.length
+            ? `${paintFindings.stacking.length} wrong stacking, ${paintFindings.clipping.length} over-clipped`
+            : 'paint order and clipping match the design';
       } else {
         renderPng = await renderHtml(html, renderOpts);
       }
@@ -412,10 +462,13 @@ server.registerTool(
       const correction = buildCorrectionPrompt(diff, { iteration: 1 });
 
       const lines = [
-        converged
-          ? `CONVERGED — ${pct(diff.diffRatio)} of pixels differ (threshold ${pct(threshold)}).`
-          : `NOT CONVERGED — ${pct(diff.diffRatio)} of pixels differ (threshold ${pct(threshold)}).`,
+        converged && paintCorrection
+          ? `NOT CONVERGED — pixels are within threshold (${pct(diff.diffRatio)}) but the layering is wrong.`
+          : converged
+            ? `CONVERGED — ${pct(diff.diffRatio)} of pixels differ (threshold ${pct(threshold)}).`
+            : `NOT CONVERGED — ${pct(diff.diffRatio)} of pixels differ (threshold ${pct(threshold)}).`,
         `Elements: ${elementSummary}`,
+        `Layering: ${paintSummary}`,
         `Rendered at ${renderOpts.width}x${renderOpts.height}, compared at ${diff.width}x${diff.height} (2x).`,
         ``,
         `  ${renderFile}  what your HTML looks like`,
@@ -423,9 +476,20 @@ server.registerTool(
         ``,
       ];
 
+      // Layering problems are reported even when the pixel diff converges: a
+      // decorative overlay on the wrong side of a card can shift too few pixels
+      // to clear the threshold while still being the first thing a human sees.
       if (!converged) {
         if (elementCorrection) lines.push(elementCorrection, '');
+        if (paintCorrection) lines.push(paintCorrection, '');
         lines.push(correction);
+        lines.push('', `Edit ${htmlFile} and call figma_verify again.`);
+      } else if (paintCorrection) {
+        lines.push(
+          `Pixel difference is at the anti-aliasing floor, but the layering is wrong:`,
+          ''
+        );
+        lines.push(paintCorrection);
         lines.push('', `Edit ${htmlFile} and call figma_verify again.`);
       } else {
         lines.push(`Remaining difference is at the anti-aliasing floor. Nothing to fix.`);

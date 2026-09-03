@@ -42,9 +42,15 @@ const round = (n, p = 2) => Number(Number(n).toFixed(p));
  * on the frame this was written for, a hanging lamp that should read as tilted
  * 24 degrees came out at -156. Report the flip so the codegen can re-apply it.
  *
- * `rotation` (radians) is the fallback for payloads fetched without
- * `geometry=paths`. It agrees with atan2 on the angle but, being a single
- * number, carries no record of a mirror.
+ * `rotation` (radians) is the fallback for payloads that arrive without
+ * `relativeTransform` — notably the whole-file endpoint, which `getNode()` falls
+ * back to when /nodes is rate-limited. It agrees with atan2 on the angle but,
+ * being a single number, carries no record of a mirror, and a mirrored node
+ * read through it is indistinguishable from an ordinary rotation. That is not a
+ * theoretical loss: it is exactly the hanging-lamp case above, which renders
+ * flipped about its own centre and reads as "the image is cropped wrong". So the
+ * fallback reports `mirrorUnknown` and the node carries a warning, rather than
+ * quietly emitting a believable-but-wrong transform.
  */
 function nodeTransform(node) {
   const m = node.relativeTransform;
@@ -54,13 +60,15 @@ function nodeTransform(node) {
     return {
       rotation: Math.abs(deg) < 0.01 ? 0 : round(deg, 3),
       mirrored: a * d - b * c < 0,
+      mirrorUnknown: false,
     };
   }
   if (typeof node.rotation === 'number' && node.rotation) {
     const deg = (node.rotation * 180) / Math.PI;
-    return { rotation: Math.abs(deg) < 0.01 ? 0 : round(deg, 3), mirrored: false };
+    const rotation = Math.abs(deg) < 0.01 ? 0 : round(deg, 3);
+    return { rotation, mirrored: false, mirrorUnknown: rotation !== 0 };
   }
-  return { rotation: 0, mirrored: false };
+  return { rotation: 0, mirrored: false, mirrorUnknown: false };
 }
 
 /**
@@ -252,7 +260,13 @@ function convert(node, ctx, options) {
   const layout = { ...containerLayout, ...childHints, ...sizing };
 
   const warnings = [];
-  const { rotation, mirrored } = nodeTransform(node);
+  const { rotation, mirrored, mirrorUnknown } = nodeTransform(node);
+  if (mirrorUnknown) {
+    warnings.push(
+      `${WARN.MIRROR_UNKNOWN}: ${rotation}deg from \`rotation\` alone — no \`relativeTransform\`, ` +
+        `so a mirrored node cannot be told from a rotated one. Re-fetch with the /nodes endpoint.`
+    );
+  }
   if (rotation && layout.position !== 'absolute' && ctx.parentLayout?.mode === LAYOUT.FLEX) {
     // In flow, the rotated element still occupies its unrotated box, so a large
     // angle can overlap its siblings the way it does not in Figma.

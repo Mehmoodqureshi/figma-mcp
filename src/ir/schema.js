@@ -20,7 +20,8 @@ export const ROLES = Object.freeze({
 
 /** Layout mode of a container. */
 export const LAYOUT = Object.freeze({
-  FLEX: 'flex', // from Figma Auto Layout
+  FLEX: 'flex', // from Figma Auto Layout (HORIZONTAL / VERTICAL)
+  GRID: 'grid', // from Figma Grid Auto Layout (layoutMode: 'GRID')
   ABSOLUTE: 'absolute', // no Auto Layout → children positioned by coords
   BLOCK: 'block', // leaf / normal flow
 });
@@ -35,9 +36,16 @@ export const LAYOUT = Object.freeze({
 
 /**
  * @typedef {Object} Layout
- * @property {'flex'|'absolute'|'block'} mode
+ * @property {'flex'|'grid'|'absolute'|'block'} mode
  * @property {'row'|'column'} [direction]        Flex only.
  * @property {number} [gap]                       Flex gap (px) — from itemSpacing.
+ * @property {string} [columns]                   Grid: CSS grid-template-columns.
+ * @property {string} [rows]                      Grid: CSS grid-template-rows.
+ * @property {number} [columnGap]                 Grid: gridColumnGap (px).
+ * @property {number} [rowGap]                    Grid: gridRowGap (px).
+ * @property {string} [gridColumn]                Grid child: CSS grid-column.
+ * @property {string} [gridRow]                   Grid child: CSS grid-row.
+ * @property {'start'|'center'|'end'} [justifySelf]  Grid child: gridChildHorizontalAlign.
  * @property {{top:number,right:number,bottom:number,left:number}} [padding]
  * @property {'flex-start'|'center'|'flex-end'|'space-between'|'space-around'} [justify]
  * @property {'flex-start'|'center'|'flex-end'|'stretch'|'baseline'} [align]

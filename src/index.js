@@ -34,3 +34,9 @@ export {
   buildElementCorrection,
   iou,
 } from './elementDiff.js';
+export {
+  expectedPaintOrder,
+  computePaintDiffs,
+  buildPaintCorrection,
+  measurePaint,
+} from './paintOrder.js';

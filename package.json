@@ -52,12 +52,15 @@
   ],
   "scripts": {
     "serve": "node src/mcp/server.js",
+    "site": "node site/server.js",
+    "site:open": "node site/server.js --open",
     "test": "node example/mcp-adapter-test.js",
     "test:server": "node example/mcp-server-test.js",
     "example": "node example/run-example.js",
     "example:ir": "node example/ir-example.js",
     "example:codegen": "node example/codegen-example.js",
     "example:element-diff": "node example/element-diff-example.js",
+    "example:paint-order": "node example/paint-order-example.js",
     "example:responsive": "node example/responsive-example.js",
     "example:pipeline": "node example/pipeline.js",
     "postinstall": "node scripts/postinstall.js"

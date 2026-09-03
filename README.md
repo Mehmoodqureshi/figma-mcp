@@ -39,7 +39,7 @@ what a browser will *do* with your CSS. Those diverge constantly — a flex gap
 that collapses, a font that falls back, an absolute child that escapes its
 parent. The only way to know is to render it and look.
 
-`figma_verify` gives the agent two independent signals per pass:
+`figma_verify` gives the agent three independent signals per pass:
 
 - **Pixel diff** — the overall mismatch ratio plus the worst regions, so it knows
   *how* wrong and *where*.
@@ -47,14 +47,39 @@ parent. The only way to know is to render it and look.
   the live DOM, and matched against its Figma box. This is what turns "the
   bottom-left looks off" into "the CTA button is missing" or "the price label is
   40px too low".
+- **Paint order and clipping** — Figma lists children back-to-front, so a node's
+  pre-order index *is* its paint order; `elementsFromPoint` over a sample grid
+  gives the rendered order wherever two elements actually overlap. This catches
+  the class of bug the other two signals are blind to by construction: elements
+  present, in exactly the right box, stacked the wrong way round — or cut off by
+  an ancestor's `overflow` where the design lets them overhang. Neither moves a
+  box, and on a tall frame neither moves the diff ratio much, but a decorative
+  overlay drawn over a photo instead of under it is the first thing a person
+  sees. Reported as `WRONG STACKING` / `OVER-CLIPPED`, and reported even when the
+  pixel diff has converged.
 
 ## Tools
 
 | Tool | What it does | Network |
 |---|---|---|
 | `figma_convert` | Fetch a frame → self-contained HTML + `ir.json` + assets as data URIs + `reference.png`. Optional React variant and responsive variant. | Figma API (cached) |
-| `figma_verify` | Render HTML in Chromium, pixel-diff vs the reference, IoU-check every element, return targeted fix instructions. | none |
+| `figma_verify` | Render HTML in Chromium, pixel-diff vs the reference, IoU-check every element, check paint order and clipping, return targeted fix instructions. | none |
 | `figma_inspect` | Print the IR as an indented outline (role, box, layout, text, tokens), filterable — read the structure without dumping raw Figma JSON into context. | none |
+
+### Responsive output depends on what the design actually declares
+
+`responsive: true` reads Figma's sizing intent — FILL becomes `flex`/`100%`, HUG becomes
+`fit-content`, FIXED keeps its px. That only exists where the designer used Auto Layout.
+
+A frame with **no** Auto Layout on the root is a canvas: every child is `position:absolute` at a
+coordinate on a 1440px artboard. There is nothing to relax, so making the root `width:100%` does not
+reflow it — the children stay pinned at their canvas coordinates and the right-hand side disappears
+under `overflow:hidden`. That reads exactly like a page breaking when you zoom.
+
+For those frames the converter keeps the exact canvas and scales it to the viewport instead, so the
+design stays intact at every width and zoom level (down to 0.5x, after which the page scrolls).
+`figma_convert` tells you which strategy it used. If you want real reflow rather than proportional
+scaling, add Auto Layout in Figma — that is the signal the converter needs.
 
 Every tool returns **file paths and numbers, never large blobs**. A converted
 frame is often 100+ KB of HTML; pushing that through a tool result would burn the
@@ -128,6 +153,24 @@ server. That means no `ANTHROPIC_API_KEY`, no second model billing, and the agen
 keeps full context on what it already tried. A headless refine loop
 (`src/refine/`) still exists for library use.
 
+## Watch the loop without an agent
+
+The same pipeline has a one-page local web front end, split in two: a chat on the
+left, the generated app on the right. You send a frame link, it asks what to
+build — HTML, React or Next.js; exact or responsive — and then converts, renders
+and diffs in front of you. The right pane carries the running app, its source
+files, the verify numbers and the pixel diff.
+
+```bash
+npm run site        # http://localhost:5173
+```
+
+It uses the same `.figma-token` and the same `.figma-cache/`, so a frame you have
+already converted re-runs offline in about a second. Useful for checking a frame
+converts cleanly before pointing an agent at it — and for showing someone what
+"verified against the design" means rather than describing it. Details in
+[`site/README.md`](site/README.md).
+
 ## Configuration
 
 | Variable | Purpose |
@@ -198,7 +241,7 @@ npm run serve        # run the MCP server on stdio
 | `src/mcp/` | MCP server, Figma REST source, frame loading, asset export |
 | `src/ir/` | Figma node tree → normalized IR (roles, boxes, auto-layout, style, tokens) |
 | `src/codegen/` | IR → HTML / React / CSS |
-| `src/render.js` `src/diff.js` `src/elementDiff.js` | Playwright render, pixel diff, bounding-box IoU |
+| `src/render.js` `src/diff.js` `src/elementDiff.js` `src/paintOrder.js` | Playwright render, pixel diff, bounding-box IoU, z-order + clipping |
 | `src/correction.js` `src/verifyLoop.js` | Turn a diff into fix instructions; drive the loop |
 | `src/refine/` | Optional headless LLM refiners (Anthropic, Gemini) |
 | `example/` | Runnable demos and the offline test suite |

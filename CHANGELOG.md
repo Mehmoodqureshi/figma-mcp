@@ -1,3 +1,54 @@
+## Unreleased
+
+- feat: `generateNext(ir, { assets })` (`src/codegen/next.js`) emits a runnable
+  Next.js App Router project — `app/page.jsx`, `app/layout.jsx`, `app/globals.css`,
+  `package.json`, `next.config.mjs`. The component file is byte-for-byte
+  `generateReact`'s output, so the two can never drift apart in what they claim
+  the design looks like; the rest is scaffolding. A canvas-fit design scales
+  itself with `useState`/`useEffect`, so that variant — and only that variant —
+  is marked `'use client'`. Fonts go through `@import` in `globals.css`, which is
+  the one mechanism that behaves the same in `next dev`, `next build` and a
+  copy-paste of the file elsewhere.
+- fix: **`generateReact` never received `assets`**, so every image emitted
+  `src={""}` and every vector emitted the "asset not exported" dashed outline —
+  the React output was structurally correct and completely blank. It now takes
+  the same `assets` map as the HTML emitter and follows the same rules: a cropped
+  fill becomes a `role="img"` div carrying the background layer, everything else
+  becomes an `<img>` with the data URI, and a missing export falls back to the
+  same transparent placeholder. On a four-image frame that is the difference
+  between 1.7 KB of markup and 5.7 MB of actual page.
+- refactor: `fontStylesheetUrls(ir)` split out of `html.js`'s `fontLinks()` and
+  exported, so emitters that cannot use a `<link>` tag can reach the same font
+  list. `generateHtml` output is byte-identical across the change.
+
+- feat: `figma_verify` now checks **paint order and clipping** alongside the
+  pixel diff and the bounding-box IoU (`src/paintOrder.js`). Figma lists children
+  back-to-front, so a node's pre-order index is its paint order; the render is
+  probed with `elementsFromPoint` over a sample grid and the two orders compared
+  wherever elements actually overlap. This closes a real blind spot: an overlay
+  given a `z-index` that puts it in front of a card the design stacks it behind
+  moves no bounding box, so IoU scores it a perfect match, and on a 1440x10490
+  frame it swaps too few pixels to clear the diff threshold — yet it is one of
+  the most obvious errors to a human. The same pass reports elements cut off by
+  an ancestor's `overflow` where the design lets them overhang, which is what
+  leaves a hard seam under a decorative element meant to bridge two sections.
+  Findings are surfaced as `WRONG STACKING` / `OVER-CLIPPED` with the Figma paint
+  indices, and are reported even when the pixel diff has converged — the headline
+  now reads NOT CONVERGED when the layering is wrong. `npm run example:paint-order`
+  demonstrates both against a three-element frame.
+- fix: paint sampling scrolls the page and uses a square sample pitch, so the
+  result no longer depends on viewport height. `elementsFromPoint` is
+  viewport-relative: a 1440x10490 frame verified at a 900px viewport was sampled
+  only across its first screen, found 13 overlapping pairs instead of 502, and
+  reported a clean bill of health for a frame with 24 stacking errors in it —
+  silently, since `figma_verify` accepts an explicit `height`. Both viewports now
+  return identical findings.
+- fix: hit-testing briefly forces `pointer-events: auto` while sampling. Without
+  it `elementsFromPoint` skips exactly the decorative overlays this check exists
+  to catch, since those routinely carry `pointer-events: none`. It has no layout
+  effect and is reverted before the function returns; the screenshot is taken
+  first, so the capture never sees it.
+
 ## 0.1.0 - 2026-09-01
 
 First release.

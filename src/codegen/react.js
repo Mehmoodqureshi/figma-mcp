@@ -7,18 +7,33 @@
 // Bound components render as real JSX elements (<Badge variant="new" />), which is
 // the whole point of Code Connect: instances become your components, not lookalikes.
 
-import { ROLES } from '../ir/schema.js';
+import { ROLES, LAYOUT } from '../ir/schema.js';
 import { cssDeclarations } from './cssgen.js';
+
+// 1x1 transparent PNG, so an <img> whose asset never exported still lays out
+// cleanly instead of showing a broken-image glyph. Same value as html.js.
+const IMG_PLACEHOLDER =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 const kebabToCamel = (k) => k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 const pascal = (name) =>
   (String(name || 'Node').replace(/[^a-zA-Z0-9]+/g, ' ').trim().split(/\s+/)
     .map((w) => w[0].toUpperCase() + w.slice(1)).join('') || 'Node');
 
-/** Declaration map → a JS style-object literal string. */
-function styleLiteral(node, ctx) {
+/**
+ * Declaration map → a JS style-object literal string.
+ *
+ * `extra` is merged in as further entries rather than spread at the call site:
+ * an <img> needs objectFit alongside the computed declarations, and
+ * `{ ...{ a: 1 }, objectFit: 'cover' }` is both unreadable and a needless second
+ * pass over a style object that can carry a multi-megabyte data URI.
+ */
+function styleLiteral(node, ctx, extra = null) {
   const d = cssDeclarations(node, ctx);
   const entries = Object.entries(d).map(([k, v]) => `${kebabToCamel(k)}: ${JSON.stringify(v)}`);
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) entries.push(`${k}: ${JSON.stringify(v)}`);
+  }
   return `{ ${entries.join(', ')} }`;
 }
 
@@ -74,17 +89,35 @@ function textChildren(text) {
 function emit(node, indent, usedComponents, ctx) {
   const pad = '  '.repeat(indent);
   const style = `style={${styleLiteral(node, ctx)}}`;
-  const childCtx = { responsive: ctx.responsive, parentLayout: node.layout };
+  const childCtx = { responsive: ctx.responsive, parentLayout: node.layout, assets: ctx.assets };
 
   switch (node.role) {
     case ROLES.TEXT: {
       const tag = textTag(node);
       return `${pad}<${tag} ${style}>${textChildren(node.text)}</${tag}>`;
     }
-    case ROLES.IMAGE:
-      return `${pad}<img ${style} src={${JSON.stringify(node.asset?.ref ? `./assets/${node.asset.ref}` : '')}} alt=${JSON.stringify(node.name)} />`;
-    case ROLES.VECTOR:
-      return `${pad}<svg ${style} viewBox=${JSON.stringify(`0 0 ${node.box.width} ${node.box.height}`)} aria-label=${JSON.stringify(node.name)}><rect width="100%" height="100%" rx="2" fill="none" stroke="#c8c8c8" strokeDasharray="3 3" /></svg>`;
+    case ROLES.IMAGE: {
+      // A cropped fill cannot be expressed on an <img> — the crop window lives in
+      // background-size/-position, which cssDeclarations has already emitted onto
+      // the style object. Same split as the HTML emitter.
+      const asset = ctx.assets?.[node.id];
+      if (node.style.imageFit?.fit === 'crop' && asset) {
+        return `${pad}<div ${style} role="img" aria-label=${JSON.stringify(node.name)} />`;
+      }
+      const fit = node.style.imageFit?.fit === 'contain' ? 'contain' : 'cover';
+      const imgStyle = `style={${styleLiteral(node, ctx, { objectFit: fit })}}`;
+      return `${pad}<img ${imgStyle} src={${JSON.stringify(asset || IMG_PLACEHOLDER)}} alt=${JSON.stringify(node.name)} />`;
+    }
+    case ROLES.VECTOR: {
+      const asset = ctx.assets?.[node.id];
+      if (asset) {
+        const vecStyle = `style={${styleLiteral(node, ctx, { objectFit: 'contain' })}}`;
+        return `${pad}<img ${vecStyle} src={${JSON.stringify(asset)}} alt=${JSON.stringify(node.name)} />`;
+      }
+      // No export: a faint dashed outline shows up as a difference without
+      // dominating the diff the way a solid filled block does.
+      return `${pad}<svg ${style} viewBox=${JSON.stringify(`0 0 ${node.box.width} ${node.box.height}`)} aria-label=${JSON.stringify(`${node.name} (asset not exported)`)}><rect width="100%" height="100%" rx="2" fill="none" stroke="#c8c8c8" strokeDasharray="3 3" /></svg>`;
+    }
     case ROLES.COMPONENT: {
       usedComponents.add(node.component.name);
       const attrs = propsToJsx(node.component.props);
@@ -102,19 +135,68 @@ function emit(node, indent, usedComponents, ctx) {
  * @param {import('../ir/schema.js').IRNode} ir
  * @param {Object} [opts]
  * @param {string} [opts.componentName]  Defaults to PascalCase of the root name.
+ * @param {Object<string,string>} [opts.assets]  node id → data URI, as for the
+ *   HTML emitter. Without it images and vectors fall back to placeholders.
  * @returns {string} JSX source
  */
 export function generateReact(ir, opts = {}) {
   const name = opts.componentName || pascal(ir.name);
   const usedComponents = new Set();
-  const tree = emit(ir, 2, usedComponents, { responsive: opts.responsive || false, parentLayout: null });
+  // Same rule as the HTML emitter: a root with no Auto Layout has no sizing
+  // intent to relax, so it keeps its exact CSS and gets scaled as a whole.
+  // See canvasFitCss in cssgen.js for why relative units clip it instead.
+  const canvasFit = Boolean(opts.responsive) && ir.layout?.mode === LAYOUT.ABSOLUTE;
+  const minScale = opts.minScale ?? 0.5;
+  const tree = emit(ir, canvasFit ? 6 : 2, usedComponents, {
+    responsive: canvasFit ? false : opts.responsive || false,
+    parentLayout: null,
+    assets: opts.assets || {},
+  });
 
   const imports = [...usedComponents]
     .map((c) => `import { ${c} } from './components/${c}';`)
     .join('\n');
 
+  if (!canvasFit) {
+    return (
+      `${imports ? imports + '\n\n' : ''}export function ${name}() {\n` +
+      `  return (\n${tree}\n  );\n}\n`
+    );
+  }
+
+  const W = Number(Number(ir.box.width).toFixed(2));
+  const H = Number(Number(ir.box.height).toFixed(2));
   return (
-    `${imports ? imports + '\n\n' : ''}export function ${name}() {\n` +
-    `  return (\n${tree}\n  );\n}\n`
+    `import { useEffect, useState } from 'react';\n` +
+    `${imports ? imports + '\n' : ''}\n` +
+    `const DESIGN_WIDTH = ${W};\n` +
+    `const DESIGN_HEIGHT = ${H};\n` +
+    `const MIN_SCALE = ${minScale};\n\n` +
+    `export function ${name}() {\n` +
+    `  const [scale, setScale] = useState(1);\n` +
+    `  useEffect(() => {\n` +
+    `    const fit = () =>\n` +
+    `      setScale(\n` +
+    `        Math.min(1, Math.max(MIN_SCALE, document.documentElement.clientWidth / DESIGN_WIDTH))\n` +
+    `      );\n` +
+    `    fit();\n` +
+    `    window.addEventListener('resize', fit);\n` +
+    `    return () => window.removeEventListener('resize', fit);\n` +
+    `  }, []);\n` +
+    `  return (\n` +
+    `    <div\n` +
+    `      style={{\n` +
+    `        position: 'relative',\n` +
+    `        width: DESIGN_WIDTH * scale,\n` +
+    `        height: DESIGN_HEIGHT * scale,\n` +
+    `        margin: '0 auto',\n` +
+    `        overflow: 'hidden',\n` +
+    `      }}\n` +
+    `    >\n` +
+    `      <div style={{ transformOrigin: 'top left', transform: \`scale(\${scale})\` }}>\n` +
+    `${tree}\n` +
+    `      </div>\n` +
+    `    </div>\n` +
+    `  );\n}\n`
   );
 }

@@ -5,8 +5,15 @@
 // then a scoped stylesheet — mirroring the "structure then style" order the plan
 // and UICopilot recommend.
 
-import { ROLES } from '../ir/schema.js';
-import { cssDeclarations, declToString, collectTokenVars, RESET } from './cssgen.js';
+import { ROLES, LAYOUT } from '../ir/schema.js';
+import {
+  cssDeclarations,
+  declToString,
+  collectTokenVars,
+  RESET,
+  canvasFitCss,
+  canvasFitScript,
+} from './cssgen.js';
 
 const escapeHtml = (s) =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -63,10 +70,16 @@ function collectFonts(node, acc = new Map()) {
  * family is unknown to Google, so a single custom/licensed font would otherwise
  * take every other font down with it.
  */
-function fontLinks(ir) {
+/**
+ * The Google Fonts css2 URLs this tree needs, in emission order.
+ *
+ * Split out from fontLinks() so emitters that cannot use a <link> tag can still
+ * reach the same list — the Next.js App Router puts them in globals.css.
+ */
+export function fontStylesheetUrls(ir) {
   const fonts = collectFonts(ir);
-  if (!fonts.size) return '';
-  const links = [...fonts.entries()].map(([family, pairs]) => {
+  if (!fonts.size) return [];
+  return [...fonts.entries()].map(([family, pairs]) => {
     const fam = family.trim().replace(/\s+/g, '+');
     // css2 requires the axis tuples sorted ascending, ital first.
     const sorted = [...pairs].sort((a, b) => {
@@ -78,12 +91,17 @@ function fontLinks(ir) {
     const axis = anyItalic
       ? `ital,wght@${sorted.join(';')}`
       : `wght@${sorted.map((p) => p.split(',')[1]).join(';')}`;
-    return `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=${fam}:${axis}&display=swap">`;
+    return `https://fonts.googleapis.com/css2?family=${fam}:${axis}&display=swap`;
   });
+}
+
+function fontLinks(ir) {
+  const urls = fontStylesheetUrls(ir);
+  if (!urls.length) return '';
   return (
     `<link rel="preconnect" href="https://fonts.googleapis.com">` +
     `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` +
-    links.join('')
+    urls.map((u) => `<link rel="stylesheet" href="${u}">`).join('')
   );
 }
 
@@ -130,16 +148,24 @@ function textTag(node) {
  * @param {Object} [opts]
  * @param {string} [opts.title='Generated']
  * @param {boolean} [opts.responsive=false]  Stage 8: emit relative units (flex/%/auto/max-width).
+ * @param {number} [opts.minScale=0.5]  Canvas-fit floor; below it the page scrolls instead of shrinking.
  * @returns {string} full HTML document
  */
 export function generateHtml(ir, opts = {}) {
-  const { title = 'Generated', responsive = false, assets = {} } = opts;
+  const { title = 'Generated', responsive = false, assets = {}, minScale = 0.5 } = opts;
   const rules = [];
   let counter = 0;
 
+  // A root with no Auto Layout has no sizing intent to relax, so the relative
+  // units the responsive pass emits would leave every absolutely-placed child
+  // pinned to its 1440-canvas coordinate inside a narrower box — clipped, not
+  // reflowed. Those trees get the exact CSS plus a scaling shell instead.
+  const canvasFit = responsive && ir.layout?.mode === LAYOUT.ABSOLUTE;
+  const nodeResponsive = canvasFit ? false : responsive;
+
   function walk(node, parentLayout) {
     const cls = `${slug(node.name)}-${counter++}`;
-    rules.push(`.${cls}{${declToString(cssDeclarations(node, { responsive, parentLayout, assets }))}}`);
+    rules.push(`.${cls}{${declToString(cssDeclarations(node, { responsive: nodeResponsive, parentLayout, assets }))}}`);
     // data-ir-id lets Stage 7 measure each element's rendered box and compare it
     // to the design box (element-bbox IoU). Harmless if unused.
     const id = `data-ir-id="${escapeHtml(node.id)}"`;
@@ -179,7 +205,14 @@ export function generateHtml(ir, opts = {}) {
     }
   }
 
-  const body = walk(ir, null);
+  let body = walk(ir, null);
+  let shellCss = '';
+  let shellScript = '';
+  if (canvasFit) {
+    body = `<div class="figma-canvas-fit">${body}</div>`;
+    shellCss = canvasFitCss(ir.box.width, ir.box.height);
+    shellScript = `<script>${canvasFitScript(ir.box.width, ir.box.height, minScale)}</script>`;
+  }
 
   // Token vars are referenced with exact fallbacks (var(--x, #fff)), so we must
   // NOT emit `--x: initial` here — that would shadow the fallback. Instead list
@@ -193,7 +226,7 @@ export function generateHtml(ir, opts = {}) {
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
     `<title>${escapeHtml(title)}</title>` +
     fontLinks(ir) +
-    `<style>${RESET}${rootBlock}${rules.join('')}</style>` +
-    `</head><body>${body}</body></html>`
+    `<style>${RESET}${shellCss}${rootBlock}${rules.join('')}</style>` +
+    `</head><body>${body}${shellScript}</body></html>`
   );
 }

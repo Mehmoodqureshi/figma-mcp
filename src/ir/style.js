@@ -13,6 +13,7 @@ export const WARN = Object.freeze({
   EFFECT_UNSUPPORTED: 'EFFECT_UNSUPPORTED',
   ARC_UNSUPPORTED: 'ARC_UNSUPPORTED',
   ROTATION_IN_FLOW: 'ROTATION_IN_FLOW',
+  MIRROR_UNKNOWN: 'MIRROR_UNKNOWN',
 });
 
 const round = (n, p = 2) => Number(Number(n).toFixed(p));
@@ -203,17 +204,27 @@ export function resolveImageFit(fills) {
   const paint = topVisiblePaint(fills, 'IMAGE');
   if (!paint) return undefined;
   const fit = SCALE_MODE[paint.scaleMode] || 'cover';
+  // A PAINT's own opacity is not the node's. Figma uses it constantly to sink a
+  // hero photo into the frame colour behind it — the JJ Carson hero is a
+  // full-bleed photo at 0.4 over near-black, and dropping the 0.4 renders the
+  // whole band at full brightness. It has no per-layer equivalent in CSS, so
+  // codegen applies it as element opacity, which is only safe on a leaf.
+  const alpha = typeof paint.opacity === 'number' && paint.opacity < 1 ? round(paint.opacity, 3) : undefined;
   const m = paint.imageTransform;
-  if (fit !== 'crop' || !Array.isArray(m) || m.length < 2) return { fit };
+  if (fit !== 'crop' || !Array.isArray(m) || m.length < 2) {
+    return alpha === undefined ? { fit } : { fit, opacity: alpha };
+  }
 
   const sx = m[0][0];
   const sy = m[1][1];
   const tx = m[0][2] ?? 0;
   const ty = m[1][2] ?? 0;
-  if (!(sx > 0) || !(sy > 0)) return { fit: 'cover' }; // rotated/degenerate — don't guess
+  // rotated/degenerate crop window — don't guess the box, but keep the alpha
+  if (!(sx > 0) || !(sy > 0)) return alpha === undefined ? { fit: 'cover' } : { fit: 'cover', opacity: alpha };
 
   return {
     fit: 'crop',
+    ...(alpha === undefined ? {} : { opacity: alpha }),
     sizeX: round(100 / sx, 3),
     sizeY: round(100 / sy, 3),
     // The offset is a fraction of the leftover, exactly like a CSS percentage.

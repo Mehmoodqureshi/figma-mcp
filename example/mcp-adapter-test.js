@@ -5,7 +5,7 @@
 import { PNG } from 'pngjs';
 import { FigmaRestSource, loadFrame, parseFigmaUrl } from '../src/mcp/index.js';
 import { figmaToIR, validateNode } from '../src/ir/index.js';
-import { generateHtml } from '../src/codegen/index.js';
+import { generateHtml, tokenToVar } from '../src/codegen/index.js';
 import { raw } from './fixture.js';
 
 let failures = 0;
@@ -238,6 +238,219 @@ async function main() {
     Math.abs(fb.box.width - 547.5) < 1 && Math.abs(fb.box.height - 542) < 1,
     `size recovered from the bounding box when \`size\` is absent (${fb.box.width}x${fb.box.height})`
   );
+
+  // --- responsive: scaled canvas vs fluid ----------------------------------
+  // A root with no Auto Layout has no FILL/HUG intent to relax, so the fluid
+  // pass would leave its absolutely-placed children pinned to the design
+  // canvas inside a narrower box — clipped by overflow:hidden, not reflowed.
+  // Those trees must get the exact CSS plus a scaling shell instead.
+  console.log('\nresponsive: absolute root → scaled canvas:');
+  const irNode = (p) => ({
+    id: p.id, name: p.name, role: p.role || 'container',
+    box: p.box, layout: p.layout, style: p.style || {}, text: p.text || null,
+    tokens: {}, component: null, asset: null, warnings: [], children: p.children || [],
+  });
+
+  const canvasIr = irNode({
+    id: '1:1', name: 'Page', box: { x: 0, y: 0, width: 1440, height: 4096 },
+    layout: { mode: 'absolute', widthMode: 'fixed', heightMode: 'fixed' },
+    style: { overflow: 'hidden' },
+    children: [
+      irNode({
+        id: '1:2', name: 'Pinned', box: { x: 1200, y: 40, width: 180, height: 48 },
+        layout: { mode: 'block', position: 'absolute', widthMode: 'fixed', heightMode: 'fixed' },
+      }),
+    ],
+  });
+  const canvasHtml = generateHtml(canvasIr, { responsive: true });
+  assert(canvasHtml.includes('class="figma-canvas-fit"'), 'absolute root is wrapped in the scaling shell');
+  assert(/\.figma-canvas-fit\{[^}]*max-width:\s*1440px/.test(canvasHtml), 'shell is capped at the design width');
+  assert(/transform:\s*scale\(var\(--canvas-scale,\s*1\)\)/.test(canvasHtml), 'shell scales via --canvas-scale');
+  assert(canvasHtml.includes('var W=1440,H=4096'), 'fit script carries the design box');
+  assert(
+    /\.pinned-1\{[^}]*left:\s*1200px[^}]*width:\s*180px/.test(canvasHtml),
+    'children inside the shell keep their exact canvas coordinates'
+  );
+  assert(
+    !/\.page-0\{[^}]*width:\s*100%/.test(canvasHtml),
+    'the root is NOT relaxed to width:100% — that is what clipped it before'
+  );
+
+  // An Auto Layout root does have sizing intent, so it still gets fluid units
+  // and no shell — scaling a design that can genuinely reflow would be a
+  // regression, not a fix.
+  console.log('\nresponsive: auto-layout root → fluid, no shell:');
+  const flexIr = irNode({
+    id: '2:1', name: 'Stack', box: { x: 0, y: 0, width: 1440, height: 600 },
+    layout: {
+      mode: 'flex', direction: 'column', gap: 16, justify: 'flex-start', align: 'flex-start',
+      widthMode: 'fixed', heightMode: 'hug',
+    },
+    children: [
+      irNode({
+        id: '2:2', name: 'Row', box: { x: 0, y: 0, width: 1440, height: 80 },
+        layout: { mode: 'block', position: 'static', widthMode: 'fill', heightMode: 'hug' },
+      }),
+    ],
+  });
+  const flexHtml = generateHtml(flexIr, { responsive: true });
+  assert(!flexHtml.includes('figma-canvas-fit'), 'auto-layout root gets no scaling shell');
+  assert(/\.stack-0\{[^}]*width:\s*100%[^}]*max-width:\s*1440px/.test(flexHtml), 'auto-layout root stays fluid');
+  assert(/\.row-1\{[^}]*width:\s*100%/.test(flexHtml), 'a FILL child still becomes width:100%');
+
+  // Exact mode is the verify loop's starting point and must be untouched.
+  const exactHtml = generateHtml(canvasIr);
+  assert(!exactHtml.includes('figma-canvas-fit'), 'exact mode emits no shell');
+  assert(/\.page-0\{[^}]*width:\s*1440px/.test(exactHtml), 'exact mode still pins the root to the design width');
+
+  // --- degraded geometry: rotation without relativeTransform ---------------
+  // The whole-file endpoint (getNode()'s fallback when /nodes is rate-limited)
+  // returns `rotation` but no `relativeTransform`. A mirrored node is then
+  // indistinguishable from a rotated one, and emitting the angle alone flips
+  // the artwork about its own centre — it must be reported, not guessed.
+  console.log('\nrotation without relativeTransform:');
+  const degraded = {
+    ...frameRaw,
+    fills: [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 }, opacity: 1 }],
+    children: [
+      {
+        ...T(-155.923, true, 868, 89, 647.59, 472.41, 783.97, 695.5),
+        size: undefined,
+        relativeTransform: undefined,
+        rotation: (-155.923 * Math.PI) / 180,
+      },
+    ],
+  };
+  const degradedIr = figmaToIR(degraded).children[0];
+  assert(
+    degradedIr.warnings.some((w) => w.startsWith('MIRROR_UNKNOWN')),
+    'a rotation-only node warns that the mirror is unknowable'
+  );
+  assert(degradedIr.style.mirrored === undefined, 'and does not claim to know it is mirrored');
+
+  // With relativeTransform present the mirror IS knowable and must not warn.
+  const fullIr = figmaToIR({
+    ...frameRaw,
+    fills: [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 }, opacity: 1 }],
+    children: [T(-155.923, true, 868, 89, 647.59, 472.41, 783.97, 695.5)],
+  }).children[0];
+  assert(
+    !fullIr.warnings.some((w) => w.startsWith('MIRROR_UNKNOWN')),
+    'a node with relativeTransform does not warn'
+  );
+  assert(fullIr.style.mirrored === true, 'and its negative determinant is read as a mirror');
+
+  // --- image PAINT opacity is not node opacity ------------------------------
+  // Figma sinks a hero photo into the frame colour with a paint-level opacity.
+  // CSS has no per-background-layer alpha, so it becomes element opacity — safe
+  // on a leaf, wrong on a container whose children would fade with it.
+  console.log('\nimage fill opacity:');
+  const imgPaint = (o) => ({
+    type: 'IMAGE', scaleMode: 'FILL', opacity: o, imageRef: 'ref123', blendMode: 'NORMAL',
+  });
+  const leafRaw = {
+    ...frameRaw,
+    fills: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0 }, opacity: 1 }],
+    children: [
+      { id: '9:1', name: 'Hero', type: 'RECTANGLE', fills: [imgPaint(0.4)],
+        absoluteBoundingBox: { x: 0, y: 0, width: 400, height: 300 } },
+    ],
+  };
+  const leaf = figmaToIR(leafRaw).children[0];
+  assert(leaf.style.imageFit?.opacity === 0.4, 'a paint-level opacity survives into the IR');
+  const leafCss = generateHtml(leafRaw && figmaToIR(leafRaw), { assets: { '9:1': 'data:image/png;base64,AA' } });
+  assert(/\.hero-1\{[^}]*opacity:\s*0\.4/.test(leafCss), 'and becomes element opacity on a leaf');
+
+  const parentRaw = {
+    ...frameRaw,
+    fills: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0 }, opacity: 1 }],
+    children: [
+      { id: '9:2', name: 'Band', type: 'FRAME', fills: [imgPaint(0.4)],
+        absoluteBoundingBox: { x: 0, y: 0, width: 400, height: 300 },
+        children: [
+          { id: '9:3', name: 'Caption', type: 'TEXT', characters: 'hi',
+            style: { fontFamily: 'Inter', fontSize: 16 },
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 20 } },
+        ] },
+    ],
+  };
+  const parentCss = generateHtml(figmaToIR(parentRaw), { assets: { '9:2': 'data:image/png;base64,AA' } });
+  assert(
+    !/\.band-1\{[^}]*opacity:\s*0\.4/.test(parentCss),
+    'a node with children is NOT faded — that would dim its own text'
+  );
+
+  // --- Figma Grid Auto Layout ----------------------------------------------
+  // layoutMode 'GRID' used to fall through to the flex branch, where
+  // `direction: mode === 'HORIZONTAL' ? 'row' : 'column'` labelled it a COLUMN
+  // and stacked a row of three testimonial cards on top of each other.
+  console.log('\nGrid Auto Layout → CSS grid:');
+  const gridCell = (i, name) => ({
+    id: `8:${i + 2}`, name, type: 'FRAME',
+    absoluteBoundingBox: { x: i * 100, y: 0, width: 100, height: 80 },
+    gridColumnAnchorIndex: i, gridRowAnchorIndex: 0,
+    gridColumnSpan: 1, gridRowSpan: 1,
+    gridChildHorizontalAlign: 'AUTO', gridChildVerticalAlign: 'AUTO',
+    layoutSizingHorizontal: 'FILL', layoutSizingVertical: 'HUG',
+  });
+  const gridRaw = {
+    ...frameRaw,
+    fills: [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 }, opacity: 1 }],
+    children: [
+      {
+        id: '8:1', name: 'Row', type: 'FRAME', layoutMode: 'GRID',
+        absoluteBoundingBox: { x: 0, y: 0, width: 300, height: 80 },
+        gridColumnCount: 3, gridRowCount: 1, gridColumnGap: 12, gridRowGap: 0,
+        gridColumnsSizing: 'repeat(3,minmax(0,1fr))', gridRowsSizing: ' 80px',
+        paddingTop: 25,
+        children: [gridCell(0, 'CellA'), gridCell(1, 'CellB'), gridCell(2, 'CellC')],
+      },
+    ],
+  };
+  const gridIr = figmaToIR(gridRaw).children[0];
+  assert(gridIr.layout.mode === 'grid', 'layoutMode GRID becomes layout.mode "grid", not flex');
+  assert(gridIr.layout.direction === undefined, 'and carries no flex direction to mislabel it');
+  assert(gridIr.layout.columns === 'repeat(3,minmax(0,1fr))', "Figma's track list is used verbatim");
+  assert(gridIr.children[1].layout.gridColumn === '2', 'a 0-based anchor becomes a 1-based grid line');
+  const gridHtml = generateHtml(figmaToIR(gridRaw));
+  assert(/\.row-1\{[^}]*display:\s*grid/.test(gridHtml), 'the container emits display:grid');
+  assert(
+    /\.row-1\{[^}]*grid-template-columns:\s*repeat\(3,minmax\(0,1fr\)\)/.test(gridHtml),
+    'with the design track list'
+  );
+  assert(/\.row-1\{[^}]*column-gap:\s*12px/.test(gridHtml), 'and the grid column gap');
+  assert(/\.row-1\{[^}]*align-items:\s*start/.test(gridHtml), 'items start, so a HUG child is not stretched');
+  assert(/\.cellc-4\{[^}]*grid-column:\s*3/.test(gridHtml), 'the third cell lands in column 3');
+
+  // A track list is a string from someone else's file going into our stylesheet.
+  const evilIr = figmaToIR({
+    ...gridRaw,
+    children: [{ ...gridRaw.children[0], gridColumnsSizing: '1fr}body{display:none' }],
+  }).children[0];
+  assert(
+    evilIr.layout.columns === 'repeat(3, minmax(0, 1fr))',
+    'a track list that could close the rule is rejected for an even split'
+  );
+
+  // An unrecognised (future) layoutMode must not be guessed at as a column.
+  const futureIr = figmaToIR({
+    ...gridRaw,
+    children: [{ ...gridRaw.children[0], layoutMode: 'SOMETHING_NEW', gridColumnsSizing: undefined }],
+  }).children[0];
+  assert(futureIr.layout.mode === 'absolute', 'an unknown layoutMode falls back to coordinates');
+  assert(futureIr.layout.unknownLayoutMode === 'SOMETHING_NEW', 'and records what it was');
+
+  // --- token names must be valid CSS identifiers ----------------------------
+  // Without the Variables API, Figma returns raw ids like
+  // 'VariableID:60c6…/113:705'. A `:` is not an identifier character, so
+  // var(--VariableID:60c6…) is a parse error and the browser drops the WHOLE
+  // declaration — every token-bound gap silently disappeared.
+  console.log('\ntoken names → valid CSS identifiers:');
+  const rawId = 'VariableID:60c6c3606e417a75950d057bb861c80f3637e735/113:705';
+  const varRef = tokenToVar(rawId, '6.9px');
+  assert(!/[:/]/.test(varRef.slice(0, varRef.indexOf(','))), 'no ":" or "/" survives into the property name');
+  assert(varRef.startsWith('var(--VariableID-'), `sanitized to an identifier → ${varRef.slice(0, 24)}...`);
+  assert(varRef.endsWith(', 6.9px)'), 'and the exact Figma value stays as the fallback');
 
   console.log(`\n${failures === 0 ? 'ALL PASS ✅' : `${failures} FAILED ❌`}`);
   process.exit(failures === 0 ? 0 : 1);

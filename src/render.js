@@ -8,6 +8,7 @@
 // it against the Figma reference screenshot.
 
 import { chromium } from 'playwright';
+import { measurePaint } from './paintOrder.js';
 
 /**
  * @typedef {Object} RenderOptions
@@ -119,14 +120,20 @@ export async function renderHtml(html, opts = {}) {
 }
 
 /**
- * Render a self-contained HTML string and return both the screenshot AND the
- * rendered bounding boxes of the given element ids (frame-relative to `rootId`).
- * Used by the Stage 7 element-bbox IoU check — one render, both signals.
+ * Render a self-contained HTML string and return the screenshot, the rendered
+ * bounding boxes of the given element ids (frame-relative to `rootId`), and the
+ * paint-order / clipping measurements. One render, every signal — the IoU check
+ * wants the boxes, the paint check wants the stacking, and rendering twice for
+ * them would double the slowest step in the loop.
  * @param {string} html
  * @param {string[]} ids       data-ir-id values to measure.
  * @param {string} rootId      data-ir-id of the frame root (origin for coords).
- * @param {RenderOptions} [opts]
- * @returns {Promise<{png: Buffer, boxes: Object<string,{x,y,w,h}|null>}>}
+ * @param {RenderOptions & {paintGrid?: number, paintMaxPoints?: number}} [opts]
+ * @returns {Promise<{
+ *   png: Buffer,
+ *   boxes: Object<string,{x,y,w,h}|null>,
+ *   paint: {pairs: Array<{front:string,back:string,samples:number}>, clip: Object<string,number|null>}
+ * }>}
  */
 export async function renderHtmlWithBoxes(html, ids, rootId, opts = {}) {
   const {
@@ -136,6 +143,8 @@ export async function renderHtmlWithBoxes(html, ids, rootId, opts = {}) {
     fullPage = false,
     settleMs = 250,
     fontTimeoutMs = 5000,
+    paintGrid = 48,
+    paintMaxPoints = 40000,
   } = opts;
 
   const browser = await getBrowser();
@@ -162,7 +171,16 @@ export async function renderHtmlWithBoxes(html, ids, rootId, opts = {}) {
       },
       { ids, rootId }
     );
-    return { png, boxes };
+    // Paint order is measured after the screenshot: it briefly overrides
+    // pointer-events so hit-testing can see decorative overlays, and that must
+    // not be in effect while the frame is captured.
+    const paint = await page.evaluate(measurePaint, {
+      ids,
+      rootId,
+      grid: paintGrid,
+      maxPoints: paintMaxPoints,
+    });
+    return { png, boxes, paint };
   } finally {
     await context.close();
   }
