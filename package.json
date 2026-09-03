@@ -1,6 +1,6 @@
 {
   "name": "@mehmoodqureshi/figma-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Figma to pixel-perfect code, as an MCP server. Converts a frame to self-contained HTML deterministically, then closes the loop: renders your code in Chromium, pixel-diffs it against the Figma reference, and tells the agent exactly which elements are missing or misplaced.",
   "author": "Mehmood Ur Rehman Qureshi",
   "license": "MIT",

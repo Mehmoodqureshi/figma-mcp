@@ -1,4 +1,4 @@
-## Unreleased
+## 0.2.0 - 2026-09-03
 
 - feat: `generateNext(ir, { assets })` (`src/codegen/next.js`) emits a runnable
   Next.js App Router project — `app/page.jsx`, `app/layout.jsx`, `app/globals.css`,
