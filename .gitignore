@@ -34,3 +34,4 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 *.swp
+site/demo-dist/

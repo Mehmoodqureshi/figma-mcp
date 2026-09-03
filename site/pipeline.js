@@ -132,6 +132,10 @@ function hasTransforms(node) {
  * @param {boolean} [opts.refresh]    Ignore the cache, re-fetch from Figma.
  * @param {boolean} [opts.verify]     Run the render/diff pass (default true).
  * @param {number}  [opts.threshold]  Diff ratio treated as "exact enough".
+ * @param {number}  [opts.settleMs]   Pause after load before the screenshot. The
+ *   render default is tuned for loop speed; a frame with many large images needs
+ *   longer, and screenshotting a half-painted page reports a converged frame as
+ *   failing.
  * @param {(e:object)=>void} [opts.onStep]      Progress reporter.
  * @param {()=>boolean}      [opts.isCancelled] Checked between steps.
  */
@@ -142,6 +146,7 @@ export async function run({
   refresh = false,
   verify = true,
   threshold = 0.02,
+  settleMs,
   onStep = () => {},
   isCancelled = () => false,
 }) {
@@ -368,6 +373,7 @@ export async function run({
   // --- 6. Render in Chromium ----------------------------------------------
   step('render', 'run');
   const renderOpts = { width: result.width, height: result.height, fullPage: false };
+  if (settleMs != null) renderOpts.settleMs = settleMs;
   const expected = flattenExpectedBoxes(ir);
   const { png: renderPng, boxes, paint } = await renderHtmlWithBoxes(
     html,

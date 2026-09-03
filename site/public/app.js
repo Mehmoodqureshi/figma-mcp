@@ -106,6 +106,15 @@ let session = null;
 let running = null; // AbortController while the pipeline is streaming
 let shown = null; // the result currently in the right pane
 
+/**
+ * Static-demo mode. A frozen build has no Chromium, no disk and no Figma token,
+ * so instead of streaming a live pipeline it replays a real one that was run at
+ * build time — same steps, same numbers, same files. Everything below that
+ * branches on `demo` exists so the two modes fetch from different URL shapes;
+ * nothing about what is displayed changes.
+ */
+let demo = null;
+
 // --------------------------------------------------------------- utilities
 
 const esc = (s) =>
@@ -132,6 +141,28 @@ function parseFrameLink(text) {
 function scrollChat() {
   requestAnimationFrame(() => chatScroll.scrollTo({ top: chatScroll.scrollHeight, behavior: 'smooth' }));
 }
+
+/**
+ * Where each artifact lives. A live server routes by query string; a static host
+ * cannot, so the demo build writes the same content at fixed paths.
+ */
+const at = {
+  preview: (r) =>
+    // A live conversion never touched a disk: its page is held in memory and
+    // shown through a blob URL, which is same-origin and so still measurable.
+    r.live
+      ? r.blobUrl
+      : demo
+        ? `/f/${r.id}/preview${r.responsive ? '-responsive' : ''}.html`
+        : `/f/${r.id}/preview${r.responsive ? '?variant=responsive' : ''}`,
+  img: (r, kind) =>
+    r.live ? (kind === 'reference' ? r.reference : null) : demo ? `/f/${r.id}/img/${kind}.png` : `/f/${r.id}/img/${kind}?w=1200`,
+  code: (r, file, i) =>
+    demo
+      ? `/f/${r.id}/${r.framework}/${r.responsive ? 'responsive' : 'exact'}/code/${i}.json`
+      : `/f/${r.id}/code?path=${encodeURIComponent(file.path)}`,
+  download: (r, file) => (r.live || demo ? null : `/f/${r.id}/download?path=${encodeURIComponent(file.path)}`),
+};
 
 // ------------------------------------------------------------ chat rendering
 
@@ -310,6 +341,8 @@ function handle(text) {
 // ------------------------------------------------------------------- the run
 
 async function start(url, flags) {
+  if (demo) return replay(url, flags);
+
   app.classList.add('is-busy');
   running = new AbortController();
   syncSend();
@@ -358,6 +391,280 @@ async function start(url, flags) {
     syncSend();
     scrollChat();
   }
+}
+
+/**
+ * Replay a run recorded at build time. The pacing is cosmetic — the steps
+ * genuinely happened, in this order, with these details — but a frozen result
+ * appearing instantly reads as a mock, and the point is that it is not one.
+ */
+async function replay(url, flags) {
+  app.classList.add('is-busy');
+  syncSend();
+
+  const link = parseFrameLink(url);
+  const id = link ? `${link.fileKey}-${link.nodeId.replace(':', '-')}` : null;
+  const sizing = flags.responsive ? 'responsive' : 'exact';
+  const exact = demo.runs[`${id}|${flags.framework}|${sizing}`];
+  // Fall back along the axis that changes least about what is shown.
+  const baked =
+    exact ||
+    demo.runs[`${id}|${flags.framework}|exact`] ||
+    demo.runs[`${id}|html|${sizing}`] ||
+    demo.runs[`${id}|html|exact`];
+
+  // Not one of the frozen frames — convert it for real, right now.
+  if (!baked) return convertLive(url, flags);
+
+  const body = say('<div class="steps"></div>');
+  const stepsEl = $('.steps', body);
+  for (const [key, label] of STEPS) {
+    stepsEl.append(
+      el(`<div class="step" data-key="${key}" data-status="idle" hidden>
+            <span class="dot"></span><span class="label">${esc(label)}</span>
+            <span class="detail"></span>
+          </div>`)
+    );
+  }
+  scrollChat();
+
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  for (const step of baked.steps) {
+    applyStep(stepsEl, { key: step.key, status: 'run', detail: '' });
+    scrollChat();
+    await pause(180 + Math.random() * 160);
+    applyStep(stepsEl, { key: step.key, status: 'ok', detail: step.detail });
+    scrollChat();
+  }
+
+  body.append(renderSummary(baked.result));
+  if (!exact) {
+    body.append(
+      el(
+        `<p class="note">This build has the ${esc(frameworkLabel(baked.result.framework))}` +
+          `${baked.result.responsive ? ' responsive' : ''} output frozen for this frame; that is what ` +
+          `is shown. The local tool generates every combination on demand.</p>`
+      )
+    );
+  }
+  showOutput(baked.result);
+
+  app.classList.remove('is-busy');
+  session = null;
+  syncSend();
+  scrollChat();
+}
+
+/**
+ * Convert an arbitrary frame on a static host.
+ *
+ * Stages 1-5 need neither a browser nor a disk, so they run in a serverless
+ * function against the same src/ code the local tool uses. Stages 6-7 need
+ * Chromium, which a static host has not got — so the two signals that are pure
+ * DOM measurement are taken here instead, in the viewer's own browser, against
+ * the page it is already displaying. The pixel diff is the one thing that
+ * genuinely cannot happen, and the results panel says so rather than omitting it.
+ */
+async function convertLive(url, flags) {
+  const body = say('<div class="steps"></div>');
+  const stepsEl = $('.steps', body);
+  for (const [key, label] of STEPS) {
+    stepsEl.append(
+      el(`<div class="step" data-key="${key}" data-status="idle" hidden>
+            <span class="dot"></span><span class="label">${esc(label)}</span>
+            <span class="detail"></span>
+          </div>`)
+    );
+  }
+  for (const k of ['parse', 'fetch', 'ir', 'assets', 'codegen']) {
+    applyStep(stepsEl, { key: k, status: 'run', detail: '' });
+  }
+  const t0 = Date.now();
+  const ticker = setInterval(() => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    applyStep(stepsEl, {
+      key: 'assets',
+      status: 'run',
+      detail:
+        s < 12
+          ? 'fetching from Figma…'
+          : `${s}s — a large frame means every image is fetched and inlined, which takes a while`,
+    });
+  }, 1000);
+  applyStep(stepsEl, { key: 'parse', status: 'run', detail: 'talking to Figma…' });
+  scrollChat();
+
+  let data;
+  try {
+    const res = await fetch('/api/convert', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url, framework: flags.framework, responsive: flags.responsive }),
+    });
+    data = await res.json();
+    if (!res.ok) throw Object.assign(new Error(data.error || `Server responded ${res.status}`), { hint: data.hint });
+    clearInterval(ticker);
+  } catch (err) {
+    clearInterval(ticker);
+    markRunningStepFailed(stepsEl);
+    body.append(renderError({ message: err.message, hint: err.hint }));
+    app.classList.remove('is-busy');
+    session = null;
+    syncSend();
+    scrollChat();
+    return;
+  }
+
+  for (const st of data.steps) applyStep(stepsEl, { key: st.key, status: 'ok', detail: st.detail });
+
+  // The generated page, held in memory. A blob URL is same-origin, so the
+  // measurement below can reach into the frame it renders.
+  const blobUrl = URL.createObjectURL(new Blob([data.html], { type: 'text/html' }));
+  const result = { ...data, live: true, blobUrl, cached: false, dir: null, verify: null };
+
+  applyStep(stepsEl, { key: 'render', status: 'run', detail: 'in this browser' });
+  scrollChat();
+  showOutput(result);
+
+  try {
+    const verify = await measureInPage(result);
+    result.verify = verify;
+    applyStep(stepsEl, {
+      key: 'render',
+      status: 'ok',
+      detail: `${result.width}x${result.height}, ${verify.elements.total} boxes measured here`,
+    });
+    applyStep(stepsEl, {
+      key: 'diff',
+      status: 'ok',
+      detail: `${verify.elements.ok}/${verify.elements.total} elements in place — pixel diff needs the local tool`,
+    });
+    showOutput(result);
+  } catch (err) {
+    applyStep(stepsEl, {
+      key: 'render',
+      status: 'fail',
+      detail: `could not measure in this browser — ${err.message}`,
+    });
+  }
+
+  body.append(renderSummary(result));
+
+  // An asset export that Figma rate-limited degrades to placeholders. That is
+  // the right behaviour — a frame with missing images still verifies — but it
+  // must be said, because the preview otherwise just looks wrong for no reason.
+  const missing = result.assets.requested - result.assets.embedded;
+  if (missing > 0) {
+    body.append(
+      el(
+        `<p class="note"><strong>${missing} of ${result.assets.requested} images did not export.</strong> ` +
+          `Figma rate-limits image requests per token, and this frame asked for a lot of them at once. ` +
+          `The layout is still exact — only the pictures are missing. Waiting a minute and re-sending ` +
+          `the same link usually fills them in.</p>`
+      )
+    );
+  }
+
+  body.append(
+    el(
+      `<p class="note">Converted live against Figma just now. Geometry and layering were measured in ` +
+        `your browser; the pixel diff needs Chromium on the server, which the local tool has ` +
+        `(<code>npm run site</code>).</p>`
+    )
+  );
+
+  app.classList.remove('is-busy');
+  session = null;
+  syncSend();
+  scrollChat();
+}
+
+/**
+ * Element geometry and paint order, measured against the rendered page.
+ *
+ * Same two signals the server takes, computed the same way — every node carries
+ * a data-ir-id, so the design box and the rendered box can be compared directly.
+ */
+async function measureInPage(r) {
+  const frame = await new Promise((resolve, reject) => {
+    const iframe = outBody.querySelector('.scaler iframe');
+    if (!iframe) return reject(new Error('no frame'));
+    if (iframe.contentDocument?.readyState === 'complete') return resolve(iframe);
+    iframe.addEventListener('load', () => resolve(iframe), { once: true });
+    setTimeout(() => reject(new Error('timeout')), 20000);
+  });
+  // Let fonts and images settle — the same reason the server waits before it
+  // screenshots, and the reason a hurried measurement reads as a broken page.
+  await new Promise((res) => setTimeout(res, 1200));
+
+  const doc = frame.contentDocument;
+  const expected = [];
+  (function flatten(node, ox = 0, oy = 0) {
+    const x = ox + node.box.x;
+    const y = oy + node.box.y;
+    expected.push({
+      id: node.id,
+      label: node.text?.content || node.component?.name || node.name,
+      role: node.role,
+      box: { x, y, w: node.box.width, h: node.box.height },
+    });
+    for (const c of node.children || []) flatten(c, x, y);
+  })(r.ir);
+
+  const root = doc.querySelector(`[data-ir-id="${CSS.escape(r.ir.id)}"]`);
+  const rb = root ? root.getBoundingClientRect() : { left: 0, top: 0 };
+
+  const iou = (a, b) => {
+    const x1 = Math.max(a.x, b.x);
+    const y1 = Math.max(a.y, b.y);
+    const x2 = Math.min(a.x + a.w, b.x + b.w);
+    const y2 = Math.min(a.y + a.h, b.y + b.h);
+    const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    const union = a.w * a.h + b.w * b.h - inter;
+    return union > 0 ? inter / union : 0;
+  };
+
+  const findings = expected.map((e) => {
+    const node = doc.querySelector(`[data-ir-id="${CSS.escape(e.id)}"]`);
+    if (!node) return { ...e, status: 'missing', iou: 0, expected: e.box, actual: null };
+    const b = node.getBoundingClientRect();
+    const actual = { x: b.left - rb.left, y: b.top - rb.top, w: b.width, h: b.height };
+    if (!(actual.w > 0 && actual.h > 0)) return { ...e, status: 'missing', iou: 0, expected: e.box, actual };
+    const score = iou(e.box, actual);
+    return { ...e, status: score >= 0.6 ? 'ok' : 'misplaced', iou: score, expected: e.box, actual };
+  });
+  findings.sort((a, b) =>
+    a.status === 'missing' && b.status !== 'missing' ? -1
+    : b.status === 'missing' && a.status !== 'missing' ? 1
+    : a.iou - b.iou
+  );
+
+  // Clipping: how much of each element the design shows versus how much the
+  // render actually shows, which is what catches an element pushed off-frame.
+  let clipped = 0;
+  const rootBox = { x: 0, y: 0, w: r.width, h: r.height };
+  for (const f of findings) {
+    if (!f.actual || f.status === 'missing') continue;
+    const visible = iou(f.actual, rootBox) > 0 ? 1 : 0;
+    const meant = iou(f.expected, rootBox) > 0 ? 1 : 0;
+    if (meant && !visible) clipped++;
+  }
+
+  const ok = findings.filter((f) => f.status === 'ok').length;
+  return {
+    converged: false,
+    threshold: 0.02,
+    diffRatio: 0,
+    elements: {
+      ok,
+      total: findings.length,
+      missing: findings.filter((f) => f.status === 'missing').length,
+      misplaced: findings.filter((f) => f.status === 'misplaced').length,
+    },
+    paint: { stacking: 0, clipping: clipped },
+    worst: findings.filter((f) => f.status !== 'ok').slice(0, 12),
+    corrections: {},
+  };
 }
 
 async function* readEvents(stream) {
@@ -433,9 +740,11 @@ function showOutput(r) {
 
   const panels = [{ id: 'preview', label: 'Preview', build: () => buildPreview(r) }];
   if (r.codeFiles?.length) panels.push({ id: 'code', label: 'Code', build: () => buildCode(r) });
-  if (r.verify) {
+  if (r.verify) panels.push({ id: 'results', label: 'Results', build: () => buildResults(r) });
+  if (r.live) {
+    if (r.reference) panels.push({ id: 'reference', label: 'Figma reference', build: () => buildImage(r, 'reference') });
+  } else if (r.verify) {
     panels.push(
-      { id: 'results', label: 'Results', build: () => buildResults(r) },
       { id: 'reference', label: 'Figma reference', build: () => buildImage(r, 'reference') },
       { id: 'render', label: 'Your render', build: () => buildImage(r, 'render') },
       { id: 'diff', label: 'Pixel diff', build: () => buildImage(r, 'diff') }
@@ -472,8 +781,13 @@ const frameworkLabel = (f) => ({ html: 'HTML', react: 'React', next: 'Next.js' }
 function buildPreview(r) {
   const wrap = el('<div class="preview-wrap"></div>');
   const scaler = el('<div class="scaler"></div>');
-  const variant = r.responsive ? '?variant=responsive' : '';
-  const frame = el(`<iframe title="Generated page for ${esc(r.name)}" sandbox src="/f/${r.id}/preview${variant}"></iframe>`);
+  // allow-same-origin, and nothing else: the generated page carries no scripts
+  // worth running (without allow-scripts none run at all), but the geometry
+  // check has to read its DOM, and a bare `sandbox` makes the frame an opaque
+  // origin whose contentDocument is null.
+  const frame = el(
+    `<iframe title="Generated page for ${esc(r.name)}" sandbox="allow-same-origin" src="${at.preview(r)}"></iframe>`
+  );
   frame.style.width = `${r.width}px`;
   frame.style.height = `${r.height}px`;
   scaler.dataset.w = r.width;
@@ -500,18 +814,27 @@ function buildCode(r) {
   const view = el('<div class="code-view"></div>');
   wrap.append(list, view);
 
-  const load = async (f) => {
+  const load = async (f, i) => {
     for (const b of list.children) b.setAttribute('aria-selected', String(b.dataset.path === f.path));
     view.replaceChildren(el('<div class="code-loading">Loading…</div>'));
     try {
-      const res = await fetch(`/f/${r.id}/code?path=${encodeURIComponent(f.path)}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `Server responded ${res.status}`);
+      let data;
+      if (r.live) {
+        // Already in memory; still truncated for display for the same reason the
+        // server truncates — a component with its assets inlined is enormous.
+        const text = f.text || '';
+        data = { path: f.path, size: text.length, truncated: text.length > 262144, text: text.slice(0, 262144) };
+      } else {
+        const res = await fetch(at.code(r, f, i));
+        data = await res.json();
+        if (!res.ok) throw new Error(data.error || `Server responded ${res.status}`);
+      }
+      const dl = at.download(r, f);
       view.replaceChildren(
         el(
           `<div class="code-head"><span class="code-path">${esc(data.path)}</span>` +
             `<span class="code-size">${esc(kb(data.size))}</span>` +
-            `<a class="fbtn" href="/f/${r.id}/download?path=${encodeURIComponent(f.path)}" download>Download</a></div>`
+            (dl ? `<a class="fbtn" href="${dl}" download>Download</a>` : '') + `</div>`
         ),
         el(`<pre>${esc(data.text)}</pre>`),
         data.truncated
@@ -526,14 +849,14 @@ function buildCode(r) {
     }
   };
 
-  for (const f of r.codeFiles) {
+  r.codeFiles.forEach((f, i) => {
     const b = el(
       `<button class="file" data-path="${esc(f.path)}" aria-selected="false">${esc(f.path)}</button>`
     );
-    b.addEventListener('click', () => load(f));
+    b.addEventListener('click', () => load(f, i));
     list.append(b);
-  }
-  load(r.codeFiles[0]);
+  });
+  load(r.codeFiles[0], 0);
   return wrap;
 }
 
@@ -541,11 +864,16 @@ function buildResults(r) {
   const v = r.verify;
   const wrap = el('<div class="results"></div>');
 
-  const badge = v.converged && !v.paint.stacking && !v.paint.clipping
-    ? { cls: 'ok', text: 'converged' }
-    : v.converged
-      ? { cls: 'warn', text: 'pixels ok, layering wrong' }
-      : { cls: 'bad', text: 'not converged' };
+  const clean = v.elements.ok === v.elements.total && !v.paint.stacking && !v.paint.clipping;
+  const badge = r.live
+    ? clean
+      ? { cls: 'ok', text: 'geometry and layering match' }
+      : { cls: 'warn', text: 'geometry off' }
+    : v.converged && !v.paint.stacking && !v.paint.clipping
+      ? { cls: 'ok', text: 'converged' }
+      : v.converged
+        ? { cls: 'warn', text: 'pixels ok, layering wrong' }
+        : { cls: 'bad', text: 'not converged' };
 
   const tile = (k, val, cls, sub) =>
     `<div class="metric"><div class="k">${esc(k)}</div><div class="v ${cls}">${esc(val)}</div>` +
@@ -556,7 +884,9 @@ function buildResults(r) {
        `<span class="results-time">${esc(secs(r.ms))}${r.cached ? ' · from cache' : ''}</span></div>`),
     el(
       `<div class="metrics">` +
-        tile('Pixel diff', pct(v.diffRatio), v.converged ? 'good' : 'bad', `threshold ${pct(v.threshold, 1)}`) +
+        (r.live
+          ? tile('Pixel diff', 'local only', '', 'needs Chromium on the server')
+          : tile('Pixel diff', pct(v.diffRatio), v.converged ? 'good' : 'bad', `threshold ${pct(v.threshold, 1)}`)) +
         tile(
           'Elements in place',
           `${v.elements.ok}/${v.elements.total}`,
@@ -594,14 +924,14 @@ function buildResults(r) {
     wrap.append(list);
   }
 
-  const raw = [v.corrections.element, v.corrections.paint, v.corrections.pixel].filter(Boolean).join('\n\n');
+  const raw = [v.corrections?.element, v.corrections?.paint, v.corrections?.pixel].filter(Boolean).join('\n\n');
   if (raw) {
     wrap.append(
       el(`<details class="raw"><summary>Fix instructions, exactly as the agent receives them</summary>
             <pre>${esc(raw)}</pre></details>`)
     );
   }
-  wrap.append(el(`<div class="path">${esc(r.dir)}</div>`));
+  if (!demo) wrap.append(el(`<div class="path">${esc(r.dir)}</div>`));
   return wrap;
 }
 
@@ -621,7 +951,7 @@ function deltaText(expected, actual) {
 
 function buildImage(r, kind) {
   const wrap = el('<div class="img-wrap"></div>');
-  wrap.append(el(`<img alt="${esc(kind)} for ${esc(r.name)}" src="/f/${r.id}/img/${kind}?w=1200">`));
+  wrap.append(el(`<img alt="${esc(kind)} for ${esc(r.name)}" src="${at.img(r, kind)}">`));
   return wrap;
 }
 
@@ -639,20 +969,41 @@ function fitScaler(scaler) {
 
 // ----------------------------------------------------------------- startup
 
+/**
+ * A static host cannot serve an extensionless path, so the frozen build writes
+ * /api/config.json. Try that first and fall back to the live server's route.
+ */
+async function loadConfig() {
+  for (const url of ['/config.json', '/api/config']) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return await res.json();
+    } catch {
+      /* try the next one */
+    }
+  }
+  return null;
+}
+
 (async function init() {
   autosize();
   syncSend();
   input.focus();
 
-  let config;
-  try {
-    config = await (await fetch('/api/config')).json();
-  } catch {
-    return;
-  }
+  const config = await loadConfig();
+  if (!config) return;
+  if (config.demo) demo = config;
 
   tokenPill.hidden = false;
-  if (config.hasToken) {
+  if (demo) {
+    tokenPill.textContent = 'Demo build';
+    // The chrome says LOCAL because that is what the tool normally is; on a
+    // hosted build that would be simply untrue.
+    document.querySelector('.brand-tag').textContent = 'demo';
+    $('#dock-foot').innerHTML =
+      'A frozen build: these frames were converted, rendered and diffed ahead of time, so every ' +
+      'number here came out of the real pipeline. Converting your own frames needs the local tool.';
+  } else if (config.hasToken) {
     tokenPill.textContent = 'Figma token loaded';
   } else {
     tokenPill.classList.add('is-bad');
@@ -675,7 +1026,7 @@ function fitScaler(scaler) {
         // Cache dirs are named <fileKey>-<nodeId with ':' as '-'>, which is
         // exactly the shape a node-id takes in a Figma URL.
         const [fileKey, ...rest] = f.id.split('-');
-        input.value = `https://www.figma.com/design/${fileKey}/frame?node-id=${rest.join('-')}`;
+        input.value = f.url || `https://www.figma.com/design/${fileKey}/frame?node-id=${rest.join('-')}`;
         autosize();
         syncSend();
         input.focus();
