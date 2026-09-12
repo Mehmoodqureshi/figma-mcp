@@ -68,20 +68,34 @@ function runStyleLiteral(style) {
 }
 
 /**
- * Text as JSX children.
+ * One run of copy → JSX children, with line breaks as <br />.
  *
  * Always an expression container, never a bare literal: design copy contains
  * braces, angle brackets and quotes often enough ("{name}", "A < B", "Terms &
  * Conditions") that interpolating it raw produces JSX that will not parse.
+ *
+ * A line break in Figma arrives as "\n" inside the run. Left alone it is just
+ * whitespace to the browser, and these elements carry white-space:nowrap from
+ * cssgen, so a two-line headline renders as one long line that overflows its
+ * box — the design's own line breaks silently disappear. The HTML emitter turns
+ * them into <br> (html.js, `br()`); this is the same rule for JSX.
  */
+function runChildren(s) {
+  return String(s ?? '')
+    .split('\n')
+    .map((part, i) => (i ? '<br />' : '') + (part ? `{${JSON.stringify(part)}}` : ''))
+    .join('');
+}
+
+/** Text as JSX children. */
 function textChildren(text) {
-  if (!Array.isArray(text.runs) || text.runs.length === 0) return `{${JSON.stringify(text.content)}}`;
+  if (!Array.isArray(text.runs) || text.runs.length === 0) return runChildren(text.content);
   return text.runs
     .map((run) => {
       const css = runStyleLiteral(run.style || {});
       return css === '{  }'
-        ? `{${JSON.stringify(run.text)}}`
-        : `<span style={${css}}>{${JSON.stringify(run.text)}}</span>`;
+        ? runChildren(run.text)
+        : `<span style={${css}}>${runChildren(run.text)}</span>`;
     })
     .join('');
 }

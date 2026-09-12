@@ -24,6 +24,15 @@
   and `generateReact`, so the one interface most people use could not emit a
   Next.js project at all.
 
+- fix: `generateReact` dropped the line breaks in multi-line copy. A break
+  arrives from Figma as "\n" inside a text run, and the HTML emitter turns it
+  into `<br>` (`html.js`, `br()`) while React interpolated it as raw whitespace.
+  These elements carry `white-space:nowrap` from cssgen, so a two-line headline
+  rendered as one long line overflowing its box, with the design's own breaks
+  gone. Found by building the generated project and diffing the running page
+  against the HTML: it accounted for the whole remaining 1.42% gap, which is now
+  0.00%.
+
 ## 0.2.0 - 2026-09-03
 
 - feat: `generateNext(ir, { assets })` (`src/codegen/next.js`) emits a runnable
