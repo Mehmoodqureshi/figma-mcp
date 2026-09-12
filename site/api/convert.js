@@ -15,7 +15,12 @@
 
 import { FigmaRestSource, loadFrame, parseFigmaUrl } from './_src/mcp/index.js';
 import { figmaToIR, ROLES } from './_src/ir/index.js';
-import { generateHtml, generateReact, generateNext } from './_src/codegen/index.js';
+import {
+  generateHtml,
+  generateReact,
+  generateNext,
+  generateComponentModules,
+} from './_src/codegen/index.js';
 
 /** Same rule as the MCP server: a string imageFill is a real Figma imageRef. */
 function collectAssets(node, acc = { imageFills: [], imageNodes: [], vectors: [] }) {
@@ -129,6 +134,11 @@ export default async function handler(req, res) {
         path: 'generated.jsx',
         text: generateReact(ir, { assets, responsive }),
       });
+      // The component imports './components/<X>' for each Code Connect binding;
+      // ship those modules or the download does not compile.
+      for (const [file, text] of Object.entries(generateComponentModules(ir))) {
+        codeFiles.push({ path: `components/${file}`, text });
+      }
     } else if (framework === 'next') {
       const app = generateNext(ir, { assets, responsive, title: raw.name });
       for (const [rel, text] of Object.entries(app.files)) codeFiles.push({ path: `next/${rel}`, text });

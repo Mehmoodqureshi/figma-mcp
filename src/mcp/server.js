@@ -30,7 +30,12 @@ import { z } from 'zod';
 
 import { FigmaRestSource, loadFrame, parseFigmaUrl } from './index.js';
 import { figmaToIR, validateNode, ROLES } from '../ir/index.js';
-import { generateHtml, generateReact } from '../codegen/index.js';
+import {
+  generateHtml,
+  generateReact,
+  generateNext,
+  generateComponentModules,
+} from '../codegen/index.js';
 import { renderHtml, renderHtmlWithBoxes, closeBrowser } from '../render.js';
 import { diffImages } from '../diff.js';
 import { buildCorrectionPrompt } from '../correction.js';
@@ -148,7 +153,8 @@ server.registerTool(
     description:
       'Fetch a Figma frame and deterministically convert it to self-contained HTML (no LLM). ' +
       'Writes generated.html, reference.png, ir.json and assets.json to a cache dir and returns ' +
-      'the paths plus a summary. Figma responses are cached, so re-running is offline and free ' +
+      'the paths plus a summary. Pass react=true for a component file, or next=true for a ' +
+      'runnable Next.js App Router project you can npm install && npm run dev. Figma responses are cached, so re-running is offline and free ' +
       'unless refresh=true. Follow with figma_verify to see how close the render is.',
     inputSchema: {
       url: z
@@ -172,14 +178,25 @@ server.registerTool(
       react: z
         .boolean()
         .default(false)
-        .describe('Also emit generated.jsx (React with inline styles) alongside the HTML.'),
+        .describe(
+          'Also emit generated.jsx (React with inline styles) alongside the HTML, plus ' +
+            'components/<Name>.jsx for every Code Connect binding it imports.'
+        ),
+      next: z
+        .boolean()
+        .default(false)
+        .describe(
+          'Also emit next/ — a runnable Next.js App Router project (package.json, ' +
+            'next.config.mjs, app/layout.jsx, app/page.jsx, app/globals.css and the ' +
+            'component) that you can npm install && npm run dev as it stands.'
+        ),
       refresh: z
         .boolean()
         .default(false)
         .describe('Ignore the cache and re-fetch from the Figma API.'),
     },
   },
-  async ({ url, outDir, responsive, react, refresh }) => {
+  async ({ url, outDir, responsive, react, next: nextApp, refresh }) => {
     try {
       const token = requireToken();
       const { fileKey, nodeId } = parseFigmaUrl(url);
@@ -278,7 +295,31 @@ server.registerTool(
       // --- 4. Codegen ---
       const html = generateHtml(ir, { title: raw.name, assets, responsive });
       fs.writeFileSync(p('generated.html'), html);
-      if (react) fs.writeFileSync(p('generated.jsx'), generateReact(ir, { assets, responsive }));
+      // A bound instance imports './components/<X>' — those modules have to be
+      // written too or neither the JSX nor the Next.js project compiles.
+      let modules = {};
+      if (react) {
+        fs.writeFileSync(p('generated.jsx'), generateReact(ir, { assets, responsive }));
+        modules = generateComponentModules(ir);
+        if (Object.keys(modules).length) {
+          fs.mkdirSync(p('components'), { recursive: true });
+          for (const [file, src] of Object.entries(modules)) {
+            fs.writeFileSync(path.join(p('components'), file), src);
+          }
+        }
+      }
+
+      let nextApp_ = null;
+      if (nextApp) {
+        nextApp_ = generateNext(ir, { assets, responsive, title: raw.name });
+        // Everything under next/ so the directory is a project you can copy out
+        // whole rather than pick files apart.
+        for (const [rel, contents] of Object.entries(nextApp_.files)) {
+          const dest = p(path.join('next', rel));
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          fs.writeFileSync(dest, contents);
+        }
+      }
       // Reported below so the agent knows WHICH responsive strategy it got.
       const canvasFit = responsive && ir.layout?.mode === 'absolute';
 
@@ -300,6 +341,17 @@ server.registerTool(
         `  ${p('reference.png')}    the Figma render — the target`,
         `  ${p('ir.json')}          ${Object.values(counts).reduce((a, b) => a + b, 0)} nodes: ${countLine}`,
         react ? `  ${p('generated.jsx')}   React variant` : null,
+        react && Object.keys(modules).length
+          ? `  ${p('components')}/       ${Object.keys(modules).length} bound component(s): ` +
+            `${Object.keys(modules)
+              .map((f) => f.replace(/\.jsx$/, ''))
+              .join(', ')}`
+          : null,
+        nextApp_
+          ? `  ${p('next')}/             Next.js project (${
+              Object.keys(nextApp_.files).length
+            } files) — cd there, npm install && npm run dev`
+          : null,
         ``,
         `Assets: ${imageFills.length} image-fill + ${vectors.length} vector requested, ${embedded} embedded as data URIs.`,
         `Tokens: ${tokenCount} Figma variables resolved${tokenCount === 0 ? ' (none — the Variables API is Enterprise-only, so colors are exact literals)' : ''}.`,

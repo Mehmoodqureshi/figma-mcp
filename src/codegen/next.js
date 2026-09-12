@@ -15,7 +15,7 @@
 //    @import is the one mechanism that works the same in `next dev`, `next build`
 //    and a plain copy-paste of the file into another project.
 
-import { generateReact } from './react.js';
+import { generateReact, generateComponentModules } from './react.js';
 import { RESET, collectTokenVars } from './cssgen.js';
 import { fontStylesheetUrls } from './html.js';
 
@@ -50,6 +50,11 @@ export function generateNext(ir, opts = {}) {
   const name = opts.componentName || pascal(ir.name);
 
   const component = generateReact(ir, { assets, responsive, minScale, componentName: name });
+
+  // The component file imports './components/<X>' for every Code Connect
+  // binding. Those modules have to ship with it or `next dev` dies on the first
+  // import — see generateComponentModules().
+  const modules = generateComponentModules(ir);
 
   // The canvas-fit variant measures the viewport with useState/useEffect. Server
   // components have neither, so that file has to opt into the client boundary.
@@ -98,6 +103,10 @@ export function generateNext(ir, opts = {}) {
 
     'app/globals.css': globals,
 
+    ...Object.fromEntries(
+      Object.entries(modules).map(([file, src]) => [`app/components/${file}`, src])
+    ),
+
     'package.json':
       JSON.stringify(
         {
@@ -125,6 +134,11 @@ export function generateNext(ir, opts = {}) {
       '```bash\nnpm install\nnpm run dev\n```\n\n' +
       `\`app/${name}.jsx\` is the component — the same file the React option emits.\n` +
       `Images and vectors are inlined as data URIs, so it renders with no network.\n` +
+      (Object.keys(modules).length
+        ? `\n\`app/components/\` holds one file per Code Connect binding ` +
+          `(${Object.keys(modules).length}), generated from each instance's own content. ` +
+          `Swap them for your real components — keep applying the \`style\` prop.\n`
+        : '') +
       (useClient
         ? `\nThis frame has no Auto Layout on its root, so the component scales the whole\n` +
           `canvas to the viewport and is marked \`'use client'\` for the hooks that needs.\n`
@@ -136,5 +150,11 @@ export function generateNext(ir, opts = {}) {
         : ''),
   };
 
-  return { files, componentName: name, entry: `app/${name}.jsx`, useClient };
+  return {
+    files,
+    componentName: name,
+    entry: `app/${name}.jsx`,
+    useClient,
+    components: Object.keys(modules).map((f) => f.replace(/\.jsx$/, '')),
+  };
 }

@@ -1,3 +1,29 @@
+## Unreleased
+
+- fix: **the React and Next.js output did not compile whenever a frame used a
+  bound component.** `generateReact` emitted `import { Badge } from
+  './components/Badge'` for every Code Connect instance, and nothing anywhere
+  wrote that file — not the MCP server, not `generateNext`'s file map. Two of the
+  three frames in the local cache hit it, so `npm run dev` died on the first
+  import. `generateComponentModules(ir)` (`src/codegen/react.js`) now emits one
+  module per binding, and both callers write them.
+- fix: a bound instance rendered as a self-closing `<Badge />`, so everything
+  Figma had *inside* it was dropped from the React tree. The HTML emitter keeps
+  that content (`html.js`, `ROLES.COMPONENT`) and React silently did not — the
+  two emitters disagreed about what the design contains, and since only the HTML
+  is ever rendered, nothing caught it. The instance's content is now passed to
+  the component as children, which is where it has to live: a binding is
+  instantiated many times per frame with different copy, so content held in the
+  module is content every instance shares. Building a real page with it in the
+  module rendered every nav link with the first one's label and lost 53 of 69
+  strings; as children, the page carries 63 and the render is pixel-identical to
+  the HTML.
+- feat: `figma_convert` takes `next: true` and writes the runnable App Router
+  project to `<dir>/next/`. `generateNext` has existed since 0.2.0 but was
+  reachable only through `site/` — the MCP server imported just `generateHtml`
+  and `generateReact`, so the one interface most people use could not emit a
+  Next.js project at all.
+
 ## 0.2.0 - 2026-09-03
 
 - feat: `generateNext(ir, { assets })` (`src/codegen/next.js`) emits a runnable

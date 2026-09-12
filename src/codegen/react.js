@@ -119,9 +119,18 @@ function emit(node, indent, usedComponents, ctx) {
       return `${pad}<svg ${style} viewBox=${JSON.stringify(`0 0 ${node.box.width} ${node.box.height}`)} aria-label=${JSON.stringify(`${node.name} (asset not exported)`)}><rect width="100%" height="100%" rx="2" fill="none" stroke="#c8c8c8" strokeDasharray="3 3" /></svg>`;
     }
     case ROLES.COMPONENT: {
-      usedComponents.add(node.component.name);
+      // The instance's own content is passed as children rather than baked into
+      // the component module. One design instantiates the same binding many
+      // times with different copy — nav links, cards, price rows — so content
+      // that lives in the module is content every instance shares, which is
+      // wrong for all but the first. As children it stays per-instance, exactly
+      // as the HTML emitter keeps it.
+      if (!usedComponents.has(node.component.name)) usedComponents.set(node.component.name, node);
       const attrs = propsToJsx(node.component.props);
-      return `${pad}<${node.component.name} ${style} ${attrs} />`;
+      const open = `${pad}<${node.component.name} ${style}${attrs ? ' ' + attrs : ''}`;
+      if (!node.children || node.children.length === 0) return `${open} />`;
+      const inner = node.children.map((c) => emit(c, indent + 1, usedComponents, childCtx)).join('\n');
+      return `${open}>\n${inner}\n${pad}</${node.component.name}>`;
     }
     default: {
       const children = node.children.map((c) => emit(c, indent + 1, usedComponents, childCtx)).join('\n');
@@ -141,7 +150,7 @@ function emit(node, indent, usedComponents, ctx) {
  */
 export function generateReact(ir, opts = {}) {
   const name = opts.componentName || pascal(ir.name);
-  const usedComponents = new Set();
+  const usedComponents = new Map();
   // Same rule as the HTML emitter: a root with no Auto Layout has no sizing
   // intent to relax, so it keeps its exact CSS and gets scaled as a whole.
   // See canvasFitCss in cssgen.js for why relative units clip it instead.
@@ -153,7 +162,7 @@ export function generateReact(ir, opts = {}) {
     assets: opts.assets || {},
   });
 
-  const imports = [...usedComponents]
+  const imports = [...usedComponents.keys()]
     .map((c) => `import { ${c} } from './components/${c}';`)
     .join('\n');
 
@@ -199,4 +208,57 @@ export function generateReact(ir, opts = {}) {
     `    </div>\n` +
     `  );\n}\n`
   );
+}
+
+/**
+ * Every code component name bound anywhere in the tree.
+ *
+ * The walk descends THROUGH bound instances rather than stopping at them: a
+ * component's own content can contain further instances, and those are emitted
+ * at their own call site, so they need modules too.
+ */
+function collectBound(node, acc = new Set()) {
+  if (node.role === ROLES.COMPONENT && node.component?.name) acc.add(node.component.name);
+  for (const child of node.children || []) collectBound(child, acc);
+  return acc;
+}
+
+/**
+ * One module per bound code component — the files `generateReact()` imports.
+ *
+ * Without these the React and Next.js output does not compile: the parent says
+ * `import { Badge } from './components/Badge'` and nothing ever writes that
+ * file.
+ *
+ * Each module is a passthrough shell: it applies the `style` the parent
+ * computed and renders `children`. It deliberately holds no design content of
+ * its own, because a binding is instantiated many times across a frame with
+ * different copy in each — content kept here would be content every instance
+ * shares. The instance's own children are emitted at the call site instead, so
+ * each one keeps what Figma put in it, and this file stays the small, obvious
+ * thing you delete when you drop in your real component.
+ *
+ * @param {import('../ir/schema.js').IRNode} ir
+ * @returns {Object<string,string>}  `<Name>.jsx` → JSX source.
+ */
+export function generateComponentModules(ir) {
+  const out = {};
+  for (const name of collectBound(ir)) {
+    out[`${name}.jsx`] =
+      `// ${name} — the component the generated page imports for this Code Connect\n` +
+      `// binding. Replace it with your real one.\n` +
+      `//\n` +
+      `// Keep applying \`style\`: it carries the position and size the parent computed\n` +
+      `// from the frame, and dropping it moves the component off its spot. Keep\n` +
+      `// rendering \`children\` too — that is this instance's own content from Figma,\n` +
+      `// which differs between instances of the same component.\n` +
+      `export function ${name}({ style, children }) {\n` +
+      `  return (\n` +
+      `    <div style={style} data-component=${JSON.stringify(name)}>\n` +
+      `      {children}\n` +
+      `    </div>\n` +
+      `  );\n` +
+      `}\n`;
+  }
+  return out;
 }

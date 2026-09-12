@@ -17,7 +17,12 @@ import { fileURLToPath } from 'node:url';
 
 import { FigmaRestSource, loadFrame, parseFigmaUrl } from '../src/mcp/index.js';
 import { figmaToIR, validateNode, ROLES } from '../src/ir/index.js';
-import { generateHtml, generateReact, generateNext } from '../src/codegen/index.js';
+import {
+  generateHtml,
+  generateReact,
+  generateNext,
+  generateComponentModules,
+} from '../src/codegen/index.js';
 import { renderHtmlWithBoxes } from '../src/render.js';
 import { diffImages } from '../src/diff.js';
 import { buildCorrectionPrompt } from '../src/correction.js';
@@ -294,6 +299,16 @@ export async function run({
   if (framework === 'react') {
     fs.writeFileSync(p('generated.jsx'), generateReact(ir, { assets, responsive }));
     addFile('generated.jsx', 'React component');
+    // The component imports './components/<X>' for each Code Connect binding;
+    // without these files the download does not compile.
+    const modules = generateComponentModules(ir);
+    if (Object.keys(modules).length) {
+      fs.mkdirSync(p('components'), { recursive: true });
+      for (const [file, src] of Object.entries(modules)) {
+        fs.writeFileSync(path.join(p('components'), file), src);
+        addFile(`components/${file}`, null);
+      }
+    }
   } else if (framework === 'next') {
     const generated = generateNext(ir, { assets, responsive, title: raw.name });
     componentName = generated.componentName;

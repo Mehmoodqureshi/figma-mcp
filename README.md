@@ -62,7 +62,7 @@ parent. The only way to know is to render it and look.
 
 | Tool | What it does | Network |
 |---|---|---|
-| `figma_convert` | Fetch a frame → self-contained HTML + `ir.json` + assets as data URIs + `reference.png`. Optional React variant and responsive variant. | Figma API (cached) |
+| `figma_convert` | Fetch a frame → self-contained HTML + `ir.json` + assets as data URIs + `reference.png`. Optional `react: true` (component + the `components/` it imports) and `next: true` (a runnable App Router project), plus a responsive variant. | Figma API (cached) |
 | `figma_verify` | Render HTML in Chromium, pixel-diff vs the reference, IoU-check every element, check paint order and clipping, return targeted fix instructions. | none |
 | `figma_inspect` | Print the IR as an indented outline (role, box, layout, text, tokens), filterable — read the structure without dumping raw Figma JSON into context. | none |
 

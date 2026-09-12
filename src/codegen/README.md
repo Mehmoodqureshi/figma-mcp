@@ -16,7 +16,7 @@ loop refines toward pixel-exact.
 |---|---|
 | `cssgen.js` | IR node → CSS declarations (shared by both emitters). Token fallbacks, reset. |
 | `html.js` | `generateHtml(ir)` → self-contained HTML doc. **Primary** — renders directly in the verify loop. |
-| `react.js` | `generateReact(ir, { assets })` → React component (inline styles). Bound instances become real JSX. |
+| `react.js` | `generateReact(ir, { assets })` → React component (inline styles). Bound instances become real JSX, and `generateComponentModules(ir)` emits the `./components/*` shells it imports. |
 | `next.js` | `generateNext(ir, { assets })` → `{ files }`, a runnable Next.js App Router project. |
 | `index.js` | Public exports. |
 
@@ -57,7 +57,13 @@ Run the demo: `node example/codegen-example.js` — raw Figma → IR → HTML + 
   file exists (uses the exact value), correct after (the token wins). Referenced tokens are listed
   in a comment for discoverability.
 - **Bound components are real:** `generateReact` emits `<Badge variant="new" />` and imports it —
-  Code Connect instances become your components, not lookalike divs.
+  Code Connect instances become your components, not lookalike divs. The import only resolves if the
+  module exists, so `generateComponentModules(ir)` writes one passthrough shell per binding, and the
+  instance's own content is passed to it as children. Emitting the import without the module is the
+  difference between a project that runs and one that dies on `npm run dev`. Putting the content in
+  the module instead of at the call site compiles too, and is just as wrong: a binding is
+  instantiated many times per frame with different copy, so on a real page it rendered every nav
+  link with the first one's label and lost 53 of 69 strings.
 - **Every emitter takes the same `assets` map.** `generateReact` and `generateNext` inline the same
   data URIs the HTML emitter does, resolve cropped fills to a background layer on a `role="img"` div,
   and fall back to the same transparent placeholder when an export is missing. Without that the React
