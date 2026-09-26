@@ -121,6 +121,18 @@ Then, in the agent: copy a frame link out of Figma (right-click the frame →
 **Copy link to selection**) and say *"convert this frame and verify it until it
 converges."*
 
+### Check your setup
+
+```bash
+FIGMA_TOKEN=$FIGMA_TOKEN npx -y @mehmoodqureshi/figma-mcp --check
+```
+
+It checks Node, whether a token was found (and where, never its value), whether
+Figma accepts it, and whether the Chromium `figma_verify` renders in is
+installed, then prints `READY` or what to fix. Exit code 0 means all three tools
+will work. If Chromium is missing (a skipped download, or CI), install it with
+`npx -y @mehmoodqureshi/figma-mcp --install-browser`.
+
 ### Windows
 
 `npx` resolves to `npx.cmd`, which some MCP hosts cannot spawn directly. If the

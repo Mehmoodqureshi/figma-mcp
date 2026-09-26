@@ -1,5 +1,22 @@
-## Unreleased
+## 0.2.1 - 2026-09-25
 
+Setup can now be checked in one command, and the React and Next.js output
+compiles when a frame uses components.
+
+- feat: **`--check` tells you whether figma-mcp will work before an agent
+  tries.** The server has nothing to say until an MCP host connects, so a fresh
+  install gave no way to tell a missing token from a broken browser.
+  `npx -y @mehmoodqureshi/figma-mcp --check` reports the Node version, whether a
+  token was found and where (`environment`, or the `.figma-token` path, never
+  the value), whether Figma accepts it (`/v1/me`), and whether the Chromium that
+  `figma_verify` renders in is on disk, then prints `READY` or the fix for each
+  problem, exiting 0 or 1. `--install-browser` redoes a skipped or failed
+  Chromium download with the Playwright version this package pins. Both run
+  before the stdio transport starts, so stdout carries the report.
+- 28 new checks in `example/doctor-test.js`, now part of `npm test`: every
+  `/v1/me` answer (200, 401/403, 429, 5xx, offline, timeout), the report, and
+  the real binary in a scratch directory, including that the token value never
+  appears in the output.
 - fix: **the React and Next.js output did not compile whenever a frame used a
   bound component.** `generateReact` emitted `import { Badge } from
   './components/Badge'` for every Code Connect instance, and nothing anywhere
@@ -23,7 +40,6 @@
   reachable only through `site/` — the MCP server imported just `generateHtml`
   and `generateReact`, so the one interface most people use could not emit a
   Next.js project at all.
-
 - fix: `generateReact` dropped the line breaks in multi-line copy. A break
   arrives from Figma as "\n" inside a text run, and the HTML emitter turns it
   into `<br>` (`html.js`, `br()`) while React interpolated it as raw whitespace.

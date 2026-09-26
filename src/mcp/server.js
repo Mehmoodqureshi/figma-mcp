@@ -65,8 +65,29 @@ const CACHE_ROOT = process.env.FIGMA_MCP_CACHE_DIR
 
 // cwd first, then the package root (a git checkout run in place). An env var
 // already set always wins, so the second call only fills what the first missed.
-loadCredentials(process.cwd()); // .figma-token → FIGMA_TOKEN
-loadCredentials(ROOT);
+// Remember WHERE the token came from (never its value) for `--check`.
+const tokenFromEnv = Boolean(process.env.FIGMA_TOKEN || process.env.FIGMA_API_KEY);
+const tokenFromCwd = loadCredentials(process.cwd()).includes('FIGMA_TOKEN'); // .figma-token → FIGMA_TOKEN
+const tokenFromRoot = loadCredentials(ROOT).includes('FIGMA_TOKEN');
+const tokenSource = tokenFromEnv
+  ? 'environment'
+  : tokenFromCwd
+    ? path.join(process.cwd(), '.figma-token')
+    : tokenFromRoot
+      ? path.join(ROOT, '.figma-token')
+      : null;
+
+// `--check` / `--install-browser` are one-shot setup commands, not a server:
+// they run before the stdio transport exists, so stdout is free for the report.
+if (process.argv.includes('--check')) {
+  const { runCheck } = await import('./doctor.js');
+  process.exit((await runCheck({ tokenSource, cacheRoot: CACHE_ROOT })) ? 0 : 1);
+}
+if (process.argv.includes('--install-browser')) {
+  const { installBrowser } = await import('./doctor.js');
+  installBrowser();
+  process.exit(0);
+}
 
 /** Diagnostics to stderr — stdout belongs to the MCP protocol. */
 const note = (msg) => process.stderr.write(`[figma-mcp] ${msg}\n`);

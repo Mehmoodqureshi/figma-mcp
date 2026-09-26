@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Mehmoodqureshi/figma-mcp",
+  "title": "figma-mcp",
+  "description": "Figma to pixel-perfect code: deterministic HTML/React, then a render + pixel-diff verify loop.",
+  "repository": {
+    "url": "https://github.com/Mehmoodqureshi/figma-mcp",
+    "source": "github"
+  },
+  "version": "0.2.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@mehmoodqureshi/figma-mcp",
+      "version": "0.2.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "FIGMA_TOKEN",
+          "description": "Figma personal access token (Settings -> Security -> Personal access tokens, scope \"File content: read\"). May instead be placed in a .figma-token file in the project directory. FIGMA_API_KEY is accepted as an alias.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "FIGMA_MCP_CACHE_DIR",
+          "description": "Where converted frames are cached. Defaults to .figma-cache/ in the directory the server starts from.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}
